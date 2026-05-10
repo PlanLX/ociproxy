@@ -1,7 +1,6 @@
 # ociproxy configuration
 #
 # Mirrors verified via docker pull (2026-05-10).
-# See docs/源.md for test results.
 
 # When a request does not specify a registry prefix (e.g., /v2/library/busybox),
 # use this namespace as the default.

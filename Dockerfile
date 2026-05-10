@@ -2,10 +2,15 @@ FROM golang:1.23-alpine AS builder
 
 WORKDIR /src
 
-COPY . .
-RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /ociproxy ./cmd/ociproxy
+COPY go.mod go.sum ./
+RUN go mod download
 
-FROM alpine:3.20
+COPY . .
+
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o /ociproxy ./cmd/ociproxy
+
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
 RUN apk --no-cache add ca-certificates
 

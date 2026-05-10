@@ -4,7 +4,8 @@ BINARY    := ociproxy
 CMD       := ./cmd/ociproxy
 GO        := go
 GOFLAGS   :=
-LDFLAGS   := -s -w
+VERSION   ?= dev
+LDFLAGS   := -s -w -X main.version=$(VERSION)
 
 build:
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY) $(CMD)
