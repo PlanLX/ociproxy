@@ -1,0 +1,7 @@
+default_registry: docker.io
+registries:
+  - name: docker.io
+    mirrors:
+      - url: http://upstream:5000
+        default: true
+      - url: http://upstream-mirror:5000

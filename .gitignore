@@ -1,0 +1,46 @@
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor Files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-*
+
+# Log Files
+*.log
+logs/
+
+# Temporary Files
+temp/
+tmp/
+*.tmp
+*.bak
+*.cache
+
+# Shell Script Artifacts
+*.pid
+*.pid.lock
+
+# Environment Files (except examples)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Backup Files
+*.orig
+*.rej
+
+# Build Artifacts
+ociproxy
+dist/
+coverage.out
+
+# Test Results
+test-results/
+junit.xml
