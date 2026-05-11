@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -98,7 +99,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse the path to determine the target registry and upstream mirrors
-	info := h.parsePath(r.URL.Path)
+	info, err := h.parsePath(r.URL.Path)
+	if err != nil {
+		if errors.Is(err, errUnknownRegistry) {
+			h.logger.Warn("unknown registry", "path", r.URL.Path)
+			http.Error(w, "registry not found", http.StatusNotFound)
+			return
+		}
+		h.logger.Warn("bad request path", "path", r.URL.Path)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 	if info == nil {
 		h.logger.Warn("bad request path", "path", r.URL.Path)
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -229,6 +240,8 @@ var forwardResponseHeaders = map[string]bool{
 	"Date":                        true,
 }
 
+var errUnknownRegistry = errors.New("unknown registry")
+
 // pathInfo holds parsed path data.
 type pathInfo struct {
 	// Registry is the registry namespace from the path (e.g., "docker.io").
@@ -251,7 +264,7 @@ type pathInfo struct {
 //
 //	/v2/registry-1.docker.io/library/busybox/manifests/latest
 //	  → Registry="docker.io" (resolved via domain_alias or default), Suffix="/library/busybox/manifests/latest"
-func (h *Handler) parsePath(rawPath string) *pathInfo {
+func (h *Handler) parsePath(rawPath string) (*pathInfo, error) {
 	// Strip /v2/ prefix
 	rest := rawPath
 	if len(rest) >= 3 && rest[:3] == "/v2" {
@@ -263,7 +276,7 @@ func (h *Handler) parsePath(rawPath string) *pathInfo {
 
 	slash := indexByte(rest, '/')
 	if slash <= 0 {
-		return nil
+		return nil, nil
 	}
 
 	first := rest[:slash]
@@ -278,13 +291,8 @@ func (h *Handler) parsePath(rawPath string) *pathInfo {
 		if reg := h.cfg.RegistryByName(first); reg != nil {
 			registry = first
 		} else {
-			// Check if it maps to a known registry via domain alias, or fall back to default
-			def := h.cfg.DefaultRegistryConfig()
-			if def != nil {
-				registry = def.Name
-			} else {
-				return nil
-			}
+			// Not a known registry name and no domain alias support yet
+			return nil, errUnknownRegistry
 		}
 	} else {
 		// First segment doesn't look like a hostname (e.g., "library")
@@ -295,7 +303,7 @@ func (h *Handler) parsePath(rawPath string) *pathInfo {
 			// Use the default registry namespace
 			def := h.cfg.DefaultRegistryConfig()
 			if def == nil {
-				return nil
+				return nil, nil
 			}
 			registry = def.Name
 			// The first segment is part of the image name, include it in suffix
@@ -307,7 +315,7 @@ func (h *Handler) parsePath(rawPath string) *pathInfo {
 		Registry:   registry,
 		Suffix:     suffix,
 		IsHostname: isHostname(first),
-	}
+	}, nil
 }
 
 // resolveMirrors returns all mirrors for the path's registry, ordered by
