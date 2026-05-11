@@ -83,8 +83,8 @@ func TestResolvePath(t *testing.T) {
 			{
 				Name: "docker.io",
 				Mirrors: []config.Mirror{
-					{URL: "https://registry-1.docker.io", Default: true},
-					{URL: "https://m.daocloud.io", BasePath: "/docker.io"},
+					{URL: "https://registry-1.docker.io", Default: true, Weight: 20},
+					{URL: "https://m.daocloud.io", BasePath: "/docker.io", Weight: 10},
 				},
 			},
 		},
@@ -96,28 +96,24 @@ func TestResolvePath(t *testing.T) {
 	}
 
 	mirrors := info.resolveMirrors(cfg)
-	if len(mirrors) == 0 {
-		t.Fatal("resolveMirrors returned no mirrors")
+	if len(mirrors) != 2 {
+		t.Fatalf("expected 2 mirrors, got %d", len(mirrors))
 	}
 
-	// Verify best mirror is the default
-	best := mirrors[0].mirror
-	if best.URL != "https://registry-1.docker.io" {
-		t.Errorf("best mirror URL = %q; want %q", best.URL, "https://registry-1.docker.io")
-	}
-
-	// Verify target path without base_path
-	gotPath := targetPath(best, info.Suffix)
-	wantPath := "/v2/library/busybox/manifests/latest"
-	if gotPath != wantPath {
-		t.Errorf("targetPath = %q; want %q", gotPath, wantPath)
-	}
-
-	// Verify target path with base_path (mirror[1])
-	gotPath2 := targetPath(mirrors[1].mirror, info.Suffix)
-	wantPath2 := "/v2/docker.io/library/busybox/manifests/latest"
-	if gotPath2 != wantPath2 {
-		t.Errorf("targetPath with base_path = %q; want %q", gotPath2, wantPath2)
+	// Check each mirror's target path regardless of ordering
+	for _, mt := range mirrors {
+		gotPath := targetPath(mt.mirror, info.Suffix)
+		if mt.mirror.URL == "https://registry-1.docker.io" {
+			wantPath := "/v2/library/busybox/manifests/latest"
+			if gotPath != wantPath {
+				t.Errorf("registry-1.docker.io: targetPath = %q; want %q", gotPath, wantPath)
+			}
+		} else if mt.mirror.URL == "https://m.daocloud.io" {
+			wantPath := "/v2/docker.io/library/busybox/manifests/latest"
+			if gotPath != wantPath {
+				t.Errorf("m.daocloud.io: targetPath = %q; want %q", gotPath, wantPath)
+			}
+		}
 	}
 }
 

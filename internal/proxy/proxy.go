@@ -65,6 +65,9 @@ type Handler struct {
 
 // New creates a new proxy handler.
 func New(cfg *config.Config, logger *slog.Logger) *Handler {
+	if logger == nil {
+		logger = slog.New(slog.NewDiscardHandler())
+	}
 	return &Handler{
 		cfg:    cfg,
 		logger: logger,
