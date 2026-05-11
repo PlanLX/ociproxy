@@ -15,7 +15,7 @@ FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6
 RUN apk --no-cache add ca-certificates
 
 COPY --from=builder /ociproxy /usr/local/bin/ociproxy
-COPY --from=builder /src/examples/config.yaml /etc/ociproxy/config.yaml
+COPY --from=builder /src/examples/mirror_config.yaml /etc/ociproxy/config.yaml
 
 USER 65534:65534
 

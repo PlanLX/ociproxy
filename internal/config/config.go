@@ -166,7 +166,8 @@ func (c *Config) Validate() error {
 		}
 
 		defaults := 0
-		for i, m := range reg.Mirrors {
+		for i := range reg.Mirrors {
+			m := &reg.Mirrors[i]
 			if m.URL == "" {
 				return fmt.Errorf("mirror URL is required for registry %q, mirror %d", reg.Name, i)
 			}
@@ -204,8 +205,8 @@ func (c *Config) RegistryByName(name string) *Registry {
 func (c *Config) DefaultRegistryConfig() *Registry {
 	// Find the registry that has a default mirror (should be exactly one across all)
 	for i := range c.Registries {
-		for _, m := range c.Registries[i].Mirrors {
-			if m.Default {
+		for j := range c.Registries[i].Mirrors {
+			if c.Registries[i].Mirrors[j].Default {
 				return &c.Registries[i]
 			}
 		}

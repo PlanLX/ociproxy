@@ -1,0 +1,89 @@
+# ociproxy configuration
+#
+# Mirrors verified via docker pull (2026-05-10).
+
+# When a request does not specify a registry prefix (e.g., /v2/library/busybox),
+# use this namespace as the default.
+default_registry: docker.io
+
+registries:
+  # ──────────────────────────────────────────────
+  # docker.io
+  # ──────────────────────────────────────────────
+  - name: docker.io
+    mirrors:
+      - url: https://registry-1.docker.io
+        default: true
+        weight: 10
+
+  # ──────────────────────────────────────────────
+  # ghcr.io
+  # ──────────────────────────────────────────────
+  - name: ghcr.io
+    mirrors:
+      - url: https://ghcr.io
+        default: true
+        weight: 10
+
+  # ──────────────────────────────────────────────
+  # registry.k8s.io
+  # ──────────────────────────────────────────────
+  - name: registry.k8s.io
+    mirrors:
+      - url: https://registry.k8s.io
+        default: true
+        weight: 10
+
+  # ──────────────────────────────────────────────
+  # gcr.io
+  # ──────────────────────────────────────────────
+  - name: gcr.io
+    mirrors:
+      - url: https://gcr.io
+        default: true
+        weight: 10
+
+  # ──────────────────────────────────────────────
+  # nvcr.io
+  # ──────────────────────────────────────────────
+  - name: nvcr.io
+    mirrors:
+      - url: https://nvcr.io
+        default: true
+        weight: 10
+
+  # ──────────────────────────────────────────────
+  # docker.elastic.co
+  # ──────────────────────────────────────────────
+  - name: docker.elastic.co
+    mirrors:
+      - url: https://docker.elastic.co
+        default: true
+        weight: 10
+
+  # ──────────────────────────────────────────────
+  # mcr.microsoft.com
+  # ──────────────────────────────────────────────
+  - name: mcr.microsoft.com
+    mirrors:
+      - url: https://mcr.microsoft.com
+        default: true
+        weight: 10
+
+  # ──────────────────────────────────────────────
+  # quay.io
+  # ──────────────────────────────────────────────
+  - name: quay.io
+    mirrors:
+      - url: https://quay.io
+        default: true
+        weight: 10
+
+  # ──────────────────────────────────────────────
+  # registry.ollama.ai
+  # ──────────────────────────────────────────────
+  - name: registry.ollama.ai
+    mirrors:
+      - url: https://registry.ollama.ai
+        default: true
+        weight: 10

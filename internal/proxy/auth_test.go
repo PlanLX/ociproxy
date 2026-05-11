@@ -90,36 +90,34 @@ func TestResolvePath(t *testing.T) {
 		},
 	}
 
-	tests := []struct {
-		name        string
-		registry    string
-		suffix      string
-		wantURL     string
-		wantPath    string
-	}{
-		{
-			name:     "default mirror",
-			registry: "docker.io",
-			suffix:   "/library/busybox/manifests/latest",
-			wantURL:  "https://registry-1.docker.io",
-			wantPath: "/docker.io/library/busybox/manifests/latest",
-		},
+	info := &pathInfo{
+		Registry: "docker.io",
+		Suffix:   "/library/busybox/manifests/latest",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			info := &pathInfo{
-				Registry: tt.registry,
-				Suffix:   tt.suffix,
-			}
-			gotURL, gotPath := info.Resolve(cfg)
-			if gotURL != tt.wantURL {
-				t.Errorf("URL = %q; want %q", gotURL, tt.wantURL)
-			}
-			if gotPath != tt.wantPath {
-				t.Errorf("path = %q; want %q", gotPath, tt.wantPath)
-			}
-		})
+	mirrors := info.resolveMirrors(cfg)
+	if len(mirrors) == 0 {
+		t.Fatal("resolveMirrors returned no mirrors")
+	}
+
+	// Verify best mirror is the default
+	best := mirrors[0].mirror
+	if best.URL != "https://registry-1.docker.io" {
+		t.Errorf("best mirror URL = %q; want %q", best.URL, "https://registry-1.docker.io")
+	}
+
+	// Verify target path without base_path
+	gotPath := targetPath(best, info.Suffix)
+	wantPath := "/v2/library/busybox/manifests/latest"
+	if gotPath != wantPath {
+		t.Errorf("targetPath = %q; want %q", gotPath, wantPath)
+	}
+
+	// Verify target path with base_path (mirror[1])
+	gotPath2 := targetPath(mirrors[1].mirror, info.Suffix)
+	wantPath2 := "/v2/docker.io/library/busybox/manifests/latest"
+	if gotPath2 != wantPath2 {
+		t.Errorf("targetPath with base_path = %q; want %q", gotPath2, wantPath2)
 	}
 }
 

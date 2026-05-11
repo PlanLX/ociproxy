@@ -44,3 +44,5 @@ coverage.out
 # Test Results
 test-results/
 junit.xml
+
+.claude/*.local.*
