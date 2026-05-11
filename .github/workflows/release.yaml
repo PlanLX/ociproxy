@@ -93,3 +93,10 @@ jobs:
           git push origin "${{ steps.bump.outputs.new_tag }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITEA_TOKEN }}
+
+      - name: Mirror tag to GitHub
+        run: |
+          git remote add github "https://oauth2:${GH_PAT}@github.com/PlanLX/ociproxy.git"
+          git push github "${{ steps.bump.outputs.new_tag }}"
+        env:
+          GH_PAT: ${{ secrets.GITHUB_PAT }}
