@@ -18,5 +18,14 @@ fi
 curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
   | sh -s -- -b "$INSTALL_DIR" "$LINT_VERSION"
 
-golangci-lint version
-echo "golangci-lint installed: ${INSTALL_DIR}/golangci-lint"
+# Ensure install dir is in PATH
+if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
+  export PATH="${INSTALL_DIR}:${PATH}"
+  if [ -n "${GITHUB_PATH:-}" ]; then
+    echo "${INSTALL_DIR}" >> "$GITHUB_PATH"
+  fi
+fi
+
+LINT_BIN="${INSTALL_DIR}/golangci-lint"
+"$LINT_BIN" version
+echo "golangci-lint installed: $LINT_BIN"
