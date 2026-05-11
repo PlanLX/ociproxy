@@ -38,7 +38,7 @@ func (h *v2Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Health endpoint
 	if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 		return
 	}
 

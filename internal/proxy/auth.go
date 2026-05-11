@@ -49,7 +49,7 @@ func (a *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// Drain and close the 401 response body
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
 	challenge := parseAuthHeader(authHeader)

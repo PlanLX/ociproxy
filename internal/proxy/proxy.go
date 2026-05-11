@@ -159,7 +159,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(resp.StatusCode)
 
 		if r.Method == http.MethodGet && resp.Body != nil {
-			io.Copy(w, resp.Body)
+			_, _ = io.Copy(w, resp.Body)
 		}
 		return
 	}
@@ -173,7 +173,7 @@ func (h *Handler) serveBase(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("{}"))
+	_, _ = w.Write([]byte("{}"))
 }
 
 func (h *Handler) copyHeaders(req *http.Request, src *http.Request) {
