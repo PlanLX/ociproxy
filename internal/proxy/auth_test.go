@@ -103,12 +103,13 @@ func TestResolvePath(t *testing.T) {
 	// Check each mirror's target path regardless of ordering
 	for _, mt := range mirrors {
 		gotPath := targetPath(mt.mirror, info.Suffix)
-		if mt.mirror.URL == "https://registry-1.docker.io" {
+		switch mt.mirror.URL {
+		case "https://registry-1.docker.io":
 			wantPath := "/v2/library/busybox/manifests/latest"
 			if gotPath != wantPath {
 				t.Errorf("registry-1.docker.io: targetPath = %q; want %q", gotPath, wantPath)
 			}
-		} else if mt.mirror.URL == "https://m.daocloud.io" {
+		case "https://m.daocloud.io":
 			wantPath := "/v2/docker.io/library/busybox/manifests/latest"
 			if gotPath != wantPath {
 				t.Errorf("m.daocloud.io: targetPath = %q; want %q", gotPath, wantPath)
