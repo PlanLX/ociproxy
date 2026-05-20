@@ -75,12 +75,15 @@ func New(cfg *config.Config, logger *slog.Logger) *Handler {
 	}
 }
 
-// ServeHTTP proxies the request to the appropriate upstream mirror.
+// ServeHTTP proxieses the request to the appropriate upstream mirror.
 //
 // URL formats:
 //   /v2/<registry>/<image>/manifests/<tag>    — e.g. /v2/docker.io/library/busybox/manifests/latest
 //   /v2/<registry>/<image>/blobs/<digest>     — e.g. /v2/docker.io/library/busybox/blobs/sha256:abc123
 //   /v2/<registry>/<image>/tags/list          — list tags
+//
+// Query parameter ns= overrides the registry namespace:
+//   /v2/<image>/manifests/<tag>?ns=docker.io  — e.g. /v2/library/busybox/manifests/latest?ns=docker.io
 //
 // When no registry prefix matches a configured namespace:
 //   - If the first segment contains a dot (hostname-like), it's treated as the registry name,
@@ -98,8 +101,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the path to determine the target registry and upstream mirrors
-	info, err := h.parsePath(r.URL.Path)
+	// Parse the path to determine the target registry and upstream mirrors.
+	// The ns= query parameter can override the registry namespace extracted
+	// from the path, e.g. /v2/library/nginx/manifests/latest?ns=docker.io
+	// is routed as if the path were /v2/docker.io/library/nginx/...
+	info, err := h.parsePath(r.URL.Path, r.URL.Query().Get("ns"))
 	if err != nil {
 		if errors.Is(err, errUnknownRegistry) {
 			h.logger.Warn("unknown registry", "path", r.URL.Path)
@@ -146,7 +152,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		req.URL.RawQuery = r.URL.RawQuery
+		// Forward query params except ns (registry namespace override)
+		q := r.URL.Query()
+		q.Del("ns")
+		req.URL.RawQuery = q.Encode()
 		h.copyHeaders(req, r)
 
 		// Override Accept for manifest requests to support both Docker and OCI manifests.
@@ -254,17 +263,20 @@ type pathInfo struct {
 
 // parsePath extracts the registry namespace and image path from the URL.
 //
-// Cases:
+// When ns (namespace) is provided via query parameter, it overrides the
+// registry namespace and the entire path after /v2/ is used as the image suffix.
 //
-//	/v2/docker.io/library/busybox/manifests/latest
+// Examples:
+//
+//	/v2/docker.io/library/busybox/manifests/latest  (no ns)
 //	  → Registry="docker.io", Suffix="/library/busybox/manifests/latest"
 //
-//	/v2/library/busybox/manifests/latest  (default registry implied, no dot in first segment)
-//	  → Registry="<default_registry>", Suffix="/library/busybox/manifests/latest"
+//	/v2/library/busybox/manifests/latest?ns=docker.io
+//	  → Registry="docker.io", Suffix="/library/busybox/manifests/latest"
 //
-//	/v2/registry-1.docker.io/library/busybox/manifests/latest
-//	  → Registry="docker.io" (resolved via domain_alias or default), Suffix="/library/busybox/manifests/latest"
-func (h *Handler) parsePath(rawPath string) (*pathInfo, error) {
+//	/v2/library/busybox/manifests/latest  (no ns, no dot, not a known registry)
+//	  → Registry="<default_registry>", Suffix="/library/busybox/manifests/latest"
+func (h *Handler) parsePath(rawPath string, ns string) (*pathInfo, error) {
 	// Strip /v2/ prefix
 	rest := rawPath
 	if len(rest) >= 3 && rest[:3] == "/v2" {
@@ -272,6 +284,18 @@ func (h *Handler) parsePath(rawPath string) (*pathInfo, error) {
 	}
 	if len(rest) > 0 && rest[0] == '/' {
 		rest = rest[1:]
+	}
+
+	// When ns is provided, treat it as the registry and use the entire
+	// remaining path as the image suffix
+	if ns != "" {
+		if reg := h.cfg.RegistryByName(ns); reg != nil {
+			return &pathInfo{
+				Registry: ns,
+				Suffix:   "/" + rest,
+			}, nil
+		}
+		return nil, errUnknownRegistry
 	}
 
 	slash := indexByte(rest, '/')

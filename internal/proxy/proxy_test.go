@@ -91,3 +91,48 @@ func TestProxy_DefaultRegistryPath(t *testing.T) {
 		t.Errorf("default registry path should not be rejected, got status %d", rec.Code)
 	}
 }
+
+func TestProxy_NamespaceOverride(t *testing.T) {
+	cfg := &config.Config{
+		DefaultRegistry: "docker.io",
+		Registries: []config.Registry{
+			{
+				Name: "docker.io",
+				Mirrors: []config.Mirror{
+					{URL: "https://registry-1.docker.io", Default: true},
+				},
+			},
+			{
+				Name: "quay.io",
+				Mirrors: []config.Mirror{
+					{URL: "https://quay.io", Default: true},
+				},
+			},
+		},
+	}
+	h := proxy.New(cfg, nil)
+
+	// /v2/library/busybox/manifests/latest?ns=docker.io — ns overrides registry
+	req := httptest.NewRequest(http.MethodHead, "/v2/library/busybox/manifests/latest?ns=docker.io", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Should attempt to forward to docker.io, not reject
+	if rec.Code == http.StatusBadRequest || rec.Code == http.StatusNotFound {
+		t.Errorf("ns=docker.io path should not be rejected, got status %d", rec.Code)
+	}
+}
+
+func TestProxy_NamespaceOverrideUnknown(t *testing.T) {
+	h := proxy.New(testConfig(), nil)
+
+	// /v2/library/busybox/manifests/latest?ns=unknown.io — unknown registry via ns
+	req := httptest.NewRequest(http.MethodHead, "/v2/library/busybox/manifests/latest?ns=unknown.io", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Should return 404 for unknown registry
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("got status %d; want %d for unknown ns", rec.Code, http.StatusNotFound)
+	}
+}
