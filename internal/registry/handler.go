@@ -64,31 +64,20 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 		proxyServer.Shutdown(context.Background())
 	}
 
-	// Build distribution config
+	// Build distribution config - match registry:3 S3 driver params
 	s3Params := configuration.Parameters{
+		"region":          cfg.Storage.Region,
 		"bucket":          cfg.Storage.Bucket,
 		"accesskey":       cfg.Storage.AccessKey,
 		"secretkey":       cfg.Storage.SecretKey,
+		"regionendpoint":  cfg.Storage.RegionEndpoint,
 		"secure":          cfg.Storage.Secure,
 		"forcepathstyle":  cfg.Storage.ForcePathStyle,
 		"encrypt":         cfg.Storage.Encrypt,
-		"v4auth":          true,
-		"skipverify":      true,
-		"chunksize":       10485760, // 10MB
 	}
-
-	// Region is required by the S3 driver. For MinIO any value works.
-	region := cfg.Storage.Region
-	if region == "" {
-		region = "us-east-1"
-	}
-	s3Params["region"] = region
 
 	if cfg.Storage.RootDirectory != "" {
 		s3Params["rootdirectory"] = cfg.Storage.RootDirectory
-	}
-	if cfg.Storage.RegionEndpoint != "" {
-		s3Params["regionendpoint"] = cfg.Storage.RegionEndpoint
 	}
 
 	distCfg := &configuration.Configuration{
