@@ -35,14 +35,13 @@ type Config struct {
 }
 
 // NewHandler creates a distribution registry with S3 storage and pull-through cache.
-// The proxy handler runs on an internal port as the remote upstream.
+// Proxy handler runs on an internal port as the remote upstream.
 func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logger *slog.Logger) (http.Handler, func(), error) {
-	srvListener, err := startInternalServer(proxyHandler, logger)
+	srvLn, err := startInternalServer(proxyHandler, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create internal listener: %w", err)
 	}
 
-	// Build distribution config with proxy as pull-through upstream
 	s3Params := configuration.Parameters{
 		"region":         cfg.Storage.Region,
 		"bucket":         cfg.Storage.Bucket,
@@ -64,17 +63,34 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 			"s3": s3Params,
 		},
 		Proxy: configuration.Proxy{
-			RemoteURL: srvListener.URL,
+			RemoteURL: srvLn.URL,
 		},
 	}
 
 	distApp := handlers.NewApp(ctx, distCfg)
 
+	// Preserve ns= query param by rewriting path before distribution processes it.
+	// When client sends: /v2/openproject/openproject/manifests/16.4.1?ns=quay.io
+	// Distribution strips ns and forwards: /v2/openproject/openproject/manifests/16.4.1
+	// We rewrite to: /v2/quay.io/openproject/openproject/manifests/16.4.1
+	// So proxy can route correctly even without ns.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v2/") && r.URL.Path != "/v2" {
 			distApp.ServeHTTP(w, r)
 			return
 		}
+
+		ns := r.URL.Query().Get("ns")
+		if ns != "" {
+			rest := strings.TrimPrefix(r.URL.Path, "/v2/")
+			newPath := "/v2/" + ns + "/" + rest
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = newPath
+			r2.URL.RawQuery = ""
+			distApp.ServeHTTP(w, r2)
+			return
+		}
+
 		distApp.ServeHTTP(w, r)
 	})
 
@@ -82,31 +98,31 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 		"storage", cfg.Storage.Type,
 		"bucket", cfg.Storage.Bucket,
 		"rootdirectory", cfg.Storage.RootDirectory,
-		"proxy_url", srvListener.URL,
+		"proxy_url", srvLn.URL,
 	)
 
-	return handler, func() { srvListener.Close() }, nil
+	return handler, func() { srvLn.Close() }, nil
 }
 
-type serverListener struct {
+type srvListener struct {
 	*http.Server
 	URL string
 }
 
-func (sl *serverListener) Close() {
+func (sl *srvListener) Close() {
 	sl.Shutdown(context.Background())
 }
 
-func startInternalServer(proxyHandler http.Handler, logger *slog.Logger) (*serverListener, error) {
+func startInternalServer(proxyHandler http.Handler, logger *slog.Logger) (*srvListener, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("create listener: %w", err)
 	}
 
-	internalPort := ln.Addr().(*net.TCPAddr).Port
-	internalURL := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
+	port := ln.Addr().(*net.TCPAddr).Port
+	internalURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	proxyServer := &http.Server{
+	srv := &http.Server{
 		Handler:      proxyHandler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 5 * time.Minute,
@@ -114,10 +130,10 @@ func startInternalServer(proxyHandler http.Handler, logger *slog.Logger) (*serve
 	}
 
 	go func() {
-		if err := proxyServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			logger.Error("internal proxy server error", "error", err)
 		}
 	}()
 
-	return &serverListener{Server: proxyServer, URL: internalURL}, nil
+	return &srvListener{Server: srv, URL: internalURL}, nil
 }
