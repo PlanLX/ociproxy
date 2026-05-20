@@ -79,14 +79,13 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: dist-raw
 
       - name: Flatten artifacts
         run: |
-          for dir in dist/*/; do
-            mv "$dir"* dist/
-            rmdir "$dir"
-          done
+          mkdir -p dist
+          find dist-raw -type f -exec mv {} dist/ \;
+          rm -rf dist-raw
 
       - name: Generate checksums
         working-directory: dist
