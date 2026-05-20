@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/planlx/ociproxy/internal/config"
 )
@@ -41,7 +43,10 @@ func upstreamClient(url string) *http.Client {
 		tokenCache: make(map[string]*tokenEntry),
 	}
 
-	c := &http.Client{Transport: at}
+	c := &http.Client{
+		Transport: at,
+		Timeout:   120 * time.Second,
+	}
 
 	clients[url] = c
 	return c
@@ -158,9 +163,13 @@ func (h *Handler) tryMirrors(r *http.Request, mirrors []mirrorTarget, info *path
 			"target", tPath,
 		)
 
+		// Use a detached context with timeout, independent of the incoming
+		// request context (which may be canceled by distribution pull-through).
 		targetURL := mirrorURL + tPath
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		req, err := http.NewRequestWithContext(ctx, r.Method, targetURL, nil)
 		if err != nil {
+			cancel()
 			h.logger.Error("build request", "error", err)
 			return nil, false
 		}
@@ -176,6 +185,7 @@ func (h *Handler) tryMirrors(r *http.Request, mirrors []mirrorTarget, info *path
 		}
 
 		resp, err := upstreamClient(mirrorURL).Do(req)
+		cancel() // release context after request
 		if err != nil {
 			h.logger.Warn("upstream request failed, trying next mirror",
 				"error", err, "mirror", mirrorURL)
