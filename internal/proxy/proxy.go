@@ -131,32 +131,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try mirrors for this registry
-	resp, mirrorsAvailable := h.tryMirrors(r, mirrors, info)
+	resp, _ := h.tryMirrors(r, mirrors, info)
 	if resp != nil {
 		h.respond(w, r, resp)
 		return
 	}
 
-	// First registry returned 404 — try all other configured registries
-	// to auto-discover which upstream has this image.
-	// This handles distribution pull-through cache calls that don't carry ns=.
-	if mirrorsAvailable && info.Registry != "" {
-		for _, reg := range h.cfg.Registries {
-			if reg.Name == info.Registry {
-				continue
-			}
-			mirrors = info.resolveMirrorsForRegistry(reg.Name, h.cfg)
-			if len(mirrors) == 0 {
-				continue
-			}
-			resp, _ = h.tryMirrors(r, mirrors, &pathInfo{Registry: reg.Name, Suffix: info.Suffix})
-			if resp != nil {
-				h.respond(w, r, resp)
-				return
-			}
-		}
-	}
-
+	// All mirrors for this registry failed
 	h.logger.Error("all mirrors failed", "registry", info.Registry)
 	http.Error(w, "bad gateway", http.StatusBadGateway)
 }
@@ -399,31 +380,6 @@ func (p *pathInfo) resolveMirrors(cfg *config.Config) []mirrorTarget {
 	targets = append(targets, mirrorTarget{mirror: best})
 
 	// Add remaining mirrors as fallbacks
-	for i := range reg.Mirrors {
-		m := &reg.Mirrors[i]
-		if m.URL == best.URL {
-			continue
-		}
-		targets = append(targets, mirrorTarget{mirror: m})
-	}
-
-	return targets
-}
-
-// resolveMirrorsForRegistry resolves mirrors for a registry by name (not by path info).
-func (p *pathInfo) resolveMirrorsForRegistry(regName string, cfg *config.Config) []mirrorTarget {
-	reg := cfg.RegistryByName(regName)
-	if reg == nil {
-		return nil
-	}
-
-	best := reg.SelectMirror()
-	if best == nil {
-		return nil
-	}
-
-	var targets []mirrorTarget
-	targets = append(targets, mirrorTarget{mirror: best})
 	for i := range reg.Mirrors {
 		m := &reg.Mirrors[i]
 		if m.URL == best.URL {

@@ -1,4 +1,4 @@
-// Package registry provides an embedded OCI registry with pull-through caching.
+// Package registry provides an embedded OCI registry with S3 pull-through caching.
 package registry
 
 import (
@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/distribution/distribution/v3/configuration"
@@ -30,50 +31,27 @@ type StorageConfig struct {
 
 // Config holds the embedded registry configuration.
 type Config struct {
-	Storage     StorageConfig `yaml:"storage"`
-	ProxyRemoteURL string     `yaml:"proxy_remote_url"` // internal proxy URL for pull-through
+	Storage StorageConfig `yaml:"storage"`
 }
 
-// NewHandler creates a distribution registry handler with pull-through caching.
-// It starts an internal HTTP server on a loopback port for the proxy to serve
-// cache misses, then returns the registry as an http.Handler.
+// NewHandler creates a distribution registry with S3 storage and pull-through cache.
+// The proxy handler runs on an internal port as the remote upstream.
 func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logger *slog.Logger) (http.Handler, func(), error) {
-	// Start internal proxy server on a random localhost port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	srvListener, err := startInternalServer(proxyHandler, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create internal listener: %w", err)
 	}
 
-	internalPort := listener.Addr().(*net.TCPAddr).Port
-	internalURL := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
-
-	proxyServer := &http.Server{
-		Handler:      proxyHandler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 5 * time.Minute,
-		IdleTimeout:  120 * time.Second,
-	}
-
-	go func() {
-		if err := proxyServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-			logger.Error("internal proxy server error", "error", err)
-		}
-	}()
-
-	cleanup := func() {
-		proxyServer.Shutdown(context.Background())
-	}
-
-	// Build distribution config - match registry:3 S3 driver params
+	// Build distribution config with proxy as pull-through upstream
 	s3Params := configuration.Parameters{
-		"region":          cfg.Storage.Region,
-		"bucket":          cfg.Storage.Bucket,
-		"accesskey":       cfg.Storage.AccessKey,
-		"secretkey":       cfg.Storage.SecretKey,
-		"regionendpoint":  cfg.Storage.RegionEndpoint,
-		"secure":          cfg.Storage.Secure,
-		"forcepathstyle":  cfg.Storage.ForcePathStyle,
-		"encrypt":         cfg.Storage.Encrypt,
+		"region":         cfg.Storage.Region,
+		"bucket":         cfg.Storage.Bucket,
+		"accesskey":      cfg.Storage.AccessKey,
+		"secretkey":      cfg.Storage.SecretKey,
+		"regionendpoint": cfg.Storage.RegionEndpoint,
+		"secure":         cfg.Storage.Secure,
+		"forcepathstyle": cfg.Storage.ForcePathStyle,
+		"encrypt":        cfg.Storage.Encrypt,
 	}
 
 	if cfg.Storage.RootDirectory != "" {
@@ -86,18 +64,60 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 			"s3": s3Params,
 		},
 		Proxy: configuration.Proxy{
-			RemoteURL: internalURL,
+			RemoteURL: srvListener.URL,
 		},
 	}
 
-	// Create the distribution app (pull-through cache)
-	app := handlers.NewApp(ctx, distCfg)
+	distApp := handlers.NewApp(ctx, distCfg)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v2/") && r.URL.Path != "/v2" {
+			distApp.ServeHTTP(w, r)
+			return
+		}
+		distApp.ServeHTTP(w, r)
+	})
 
 	logger.Info("embedded registry initialized",
 		"storage", cfg.Storage.Type,
 		"bucket", cfg.Storage.Bucket,
-		"proxy_url", internalURL,
+		"rootdirectory", cfg.Storage.RootDirectory,
+		"proxy_url", srvListener.URL,
 	)
 
-	return app, cleanup, nil
+	return handler, func() { srvListener.Close() }, nil
+}
+
+type serverListener struct {
+	*http.Server
+	URL string
+}
+
+func (sl *serverListener) Close() {
+	sl.Shutdown(context.Background())
+}
+
+func startInternalServer(proxyHandler http.Handler, logger *slog.Logger) (*serverListener, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("create listener: %w", err)
+	}
+
+	internalPort := ln.Addr().(*net.TCPAddr).Port
+	internalURL := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
+
+	proxyServer := &http.Server{
+		Handler:      proxyHandler,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 5 * time.Minute,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	go func() {
+		if err := proxyServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+			logger.Error("internal proxy server error", "error", err)
+		}
+	}()
+
+	return &serverListener{Server: proxyServer, URL: internalURL}, nil
 }
