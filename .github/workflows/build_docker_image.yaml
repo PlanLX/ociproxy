@@ -18,9 +18,9 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-amd64:
+  build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,81 +41,25 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}},suffix=-amd64
-            type=semver,pattern={{major}}.{{minor}},suffix=-amd64
-            type=raw,value=latest,suffix=-amd64
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
 
-      - name: Build and push (amd64)
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-  build-arm64:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}},suffix=-arm64
-            type=semver,pattern={{major}}.{{minor}},suffix=-arm64
-            type=raw,value=latest,suffix=-arm64
-
-      - name: Build and push (arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          platforms: linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-  merge:
-    needs: [build-amd64, build-arm64]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Create and push manifest lists
-        run: |
-          IMAGE="${{ github.repository }}"
-          IMAGE_LOWER=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
-          VERSION="${{ steps.version.outputs.version }}"
-          MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1-2)
-
-          for TAG in "$VERSION" "$MAJOR_MINOR" "latest"; do
-            docker manifest create "${{ env.REGISTRY }}/${IMAGE_LOWER}:$TAG" \
-              "${{ env.REGISTRY }}/${IMAGE_LOWER}:${TAG}-amd64" \
-              "${{ env.REGISTRY }}/${IMAGE_LOWER}:${TAG}-arm64"
-            docker manifest push "${{ env.REGISTRY }}/${IMAGE_LOWER}:$TAG"
-          done
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
