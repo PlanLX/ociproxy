@@ -65,29 +65,37 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 	}
 
 	// Build distribution config
+	s3Params := configuration.Parameters{
+		"bucket":          cfg.Storage.Bucket,
+		"accesskey":       cfg.Storage.AccessKey,
+		"secretkey":       cfg.Storage.SecretKey,
+		"secure":          cfg.Storage.Secure,
+		"forcepathstyle":  cfg.Storage.ForcePathStyle,
+		"encrypt":         cfg.Storage.Encrypt,
+	}
+
+	// Region is required by the S3 driver. For MinIO any value works.
+	region := cfg.Storage.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+	s3Params["region"] = region
+
+	if cfg.Storage.RootDirectory != "" {
+		s3Params["rootdirectory"] = cfg.Storage.RootDirectory
+	}
+	if cfg.Storage.RegionEndpoint != "" {
+		s3Params["regionendpoint"] = cfg.Storage.RegionEndpoint
+	}
+
 	distCfg := &configuration.Configuration{
 		Version: "0.1",
 		Storage: configuration.Storage{
-			"s3": configuration.Parameters{
-				"region":          cfg.Storage.Region,
-				"bucket":          cfg.Storage.Bucket,
-				"accesskey":       cfg.Storage.AccessKey,
-				"secretkey":       cfg.Storage.SecretKey,
-				"secure":          cfg.Storage.Secure,
-				"forcepathstyle":  cfg.Storage.ForcePathStyle,
-				"encrypt":         cfg.Storage.Encrypt,
-			},
+			"s3": s3Params,
 		},
 		Proxy: configuration.Proxy{
 			RemoteURL: internalURL,
 		},
-	}
-
-	if cfg.Storage.RootDirectory != "" {
-		distCfg.Storage["s3"]["rootdirectory"] = cfg.Storage.RootDirectory
-	}
-	if cfg.Storage.RegionEndpoint != "" {
-		distCfg.Storage["s3"]["regionendpoint"] = cfg.Storage.RegionEndpoint
 	}
 
 	// Create the distribution app (pull-through cache)
