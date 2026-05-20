@@ -113,14 +113,16 @@ type StorageConfig struct {
 	Encrypt bool `yaml:"encrypt"`
 }
 
-// LoadFile reads config from a YAML file.
+// LoadFile reads config from a YAML file, expanding ${VAR} env references.
 func LoadFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	// Expand environment variables like ${REGISTRY_STORAGE_S3_BUCKET}
+	expanded := os.ExpandEnv(string(data))
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {
