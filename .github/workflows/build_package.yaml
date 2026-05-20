@@ -89,8 +89,10 @@ jobs:
 
       - name: Flatten artifacts
         run: |
-          find dist -mindepth 2 -type f -exec mv {} dist/ \;
-          find dist -mindepth 1 -type d -empty -delete
+          for dir in dist/*/; do
+            mv "$dir"* dist/
+            rmdir "$dir"
+          done
 
       - name: Generate checksums
         working-directory: dist
@@ -98,7 +100,7 @@ jobs:
         run: sha256sum ociproxy-* > checksums.txt
 
       - name: Create release
-        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2
+        uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: false
           files: |
