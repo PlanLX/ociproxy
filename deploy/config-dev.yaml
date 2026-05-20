@@ -1,0 +1,187 @@
+# ociproxy configuration
+#
+# Mirrors verified via docker pull (2026-05-10).
+
+# When a request does not specify a registry prefix (e.g., /v2/library/busybox),
+# use this namespace as the default.
+default_registry: docker.io
+
+registries:
+  # ──────────────────────────────────────────────
+  # docker.io
+  # ──────────────────────────────────────────────
+  - name: docker.io
+    mirrors:
+      # DaoCloud mirror (path prefix: /docker.io) — primary, highest weight
+      - url: https://m.daocloud.io
+        base_path: /docker.io
+        default: true
+        weight: 10
+
+      # GH proxy mirror (path prefix: /docker.io) — secondary
+      - url: https://docker.gh-proxy.org
+        base_path: /docker.io
+        weight: 5
+
+      # dockerproxy.net — fallback
+      - url: https://dockerproxy.net
+        weight: 3
+
+      # docker.1ms.run — fallback
+      - url: https://docker.1ms.run
+        weight: 2
+
+      # Real origin — last resort (slow from China)
+      - url: https://registry-1.docker.io
+        weight: 1
+
+  # ──────────────────────────────────────────────
+  # ghcr.io
+  # ──────────────────────────────────────────────
+  - name: ghcr.io
+    mirrors:
+      # DaoCloud mirror (path prefix: /ghcr.io) — primary
+      - url: https://m.daocloud.io
+        base_path: /ghcr.io
+        default: true
+        weight: 10
+
+      # GH proxy mirror (path prefix: /ghcr.io) — secondary
+      - url: https://docker.gh-proxy.org
+        base_path: /ghcr.io
+        weight: 5
+
+      # Real origin — last resort
+      - url: https://ghcr.io
+        weight: 1
+
+  # ──────────────────────────────────────────────
+  # registry.k8s.io
+  # ──────────────────────────────────────────────
+  - name: registry.k8s.io
+    mirrors:
+      # DaoCloud mirror (path prefix: /registry.k8s.io) — primary
+      - url: https://m.daocloud.io
+        base_path: /registry.k8s.io
+        default: true
+        weight: 10
+
+      # GH proxy mirror (path prefix: /registry.k8s.io) — secondary
+      - url: https://docker.gh-proxy.org
+        base_path: /registry.k8s.io
+        weight: 5
+
+      # Real origin — last resort
+      - url: https://registry.k8s.io
+        weight: 1
+
+  # ──────────────────────────────────────────────
+  # gcr.io
+  # ──────────────────────────────────────────────
+  - name: gcr.io
+    mirrors:
+      # DaoCloud mirror (path prefix: /gcr.io) — primary
+      - url: https://m.daocloud.io
+        base_path: /gcr.io
+        default: true
+        weight: 10
+
+      # GH proxy mirror (path prefix: /gcr.io) — secondary
+      - url: https://docker.gh-proxy.org
+        base_path: /gcr.io
+        weight: 5
+
+      # Real origin — last resort
+      - url: https://gcr.io
+        weight: 1
+
+  # ──────────────────────────────────────────────
+  # nvcr.io
+  # ──────────────────────────────────────────────
+  - name: nvcr.io
+    mirrors:
+      # DaoCloud mirror (path prefix: /nvcr.io) — primary
+      - url: https://m.daocloud.io
+        base_path: /nvcr.io
+        default: true
+        weight: 10
+
+      # GH proxy mirror (path prefix: /nvcr.io) — secondary
+      - url: https://docker.gh-proxy.org
+        base_path: /nvcr.io
+        weight: 5
+
+      # Real origin — last resort
+      - url: https://nvcr.io
+        weight: 1
+
+  # ──────────────────────────────────────────────
+  # docker.elastic.co
+  # ──────────────────────────────────────────────
+  - name: docker.elastic.co
+    mirrors:
+      # DaoCloud mirror (path prefix: /docker.elastic.co) — primary
+      - url: https://m.daocloud.io
+        base_path: /docker.elastic.co
+        default: true
+        weight: 10
+
+      # GH proxy mirror (path prefix: /docker.elastic.co) — secondary
+      - url: https://docker.gh-proxy.org
+        base_path: /docker.elastic.co
+        weight: 5
+
+      # Real origin — last resort
+      - url: https://docker.elastic.co
+        weight: 1
+
+  # ──────────────────────────────────────────────
+  # mcr.microsoft.com
+  # ──────────────────────────────────────────────
+  - name: mcr.microsoft.com
+    mirrors:
+      # DaoCloud mirror (path prefix: /mcr.microsoft.com) — primary
+      - url: https://m.daocloud.io
+        base_path: /mcr.microsoft.com
+        default: true
+        weight: 10
+
+      # GH proxy mirror (path prefix: /mcr.microsoft.com) — secondary
+      - url: https://docker.gh-proxy.org
+        base_path: /mcr.microsoft.com
+        weight: 5
+
+      # Real origin — last resort
+      - url: https://mcr.microsoft.com
+        weight: 1
+
+  # ──────────────────────────────────────────────
+  # quay.io — all domestic mirrors unavailable
+  # ──────────────────────────────────────────────
+  - name: quay.io
+    mirrors:
+      - url: https://quay.io
+        default: true
+        weight: 1
+
+  # ──────────────────────────────────────────────
+  # registry.ollama.ai — all domestic mirrors unavailable
+  # ──────────────────────────────────────────────
+  - name: registry.ollama.ai
+    mirrors:
+      - url: https://registry.ollama.ai
+        default: true
+        weight: 1
+
+storage:
+  type: s3
+  region: ${REGISTRY_STORAGE_S3_REGION}
+  bucket: ${REGISTRY_STORAGE_S3_BUCKET}
+  accesskey: ${REGISTRY_STORAGE_S3_ACCESSKEY}
+  secretkey: ${REGISTRY_STORAGE_S3_SECRETKEY}
+  regionendpoint: ${REGISTRY_STORAGE_S3_ENDPOINT}
+  secure: ${REGISTRY_STORAGE_S3_SECURE}
+  forcepathstyle: true
+  v4auth: true
+  rootdirectory: /ociproxy
+  encrypt: false

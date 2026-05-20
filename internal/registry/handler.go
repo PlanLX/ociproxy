@@ -72,6 +72,8 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 		"secure":          cfg.Storage.Secure,
 		"forcepathstyle":  cfg.Storage.ForcePathStyle,
 		"encrypt":         cfg.Storage.Encrypt,
+		"v4auth":          true,
+		"chunksize":       10485760, // 10MB
 	}
 
 	// Region is required by the S3 driver. For MinIO any value works.
