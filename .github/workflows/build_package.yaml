@@ -66,7 +66,7 @@ jobs:
           go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o ociproxy-${GOOS}-${GOARCH}${EXT} ./cmd/ociproxy
 
       - name: Upload artifact
-        uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32 # v3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ociproxy-${{ matrix.goos }}-${{ matrix.goarch }}
           path: ociproxy-*
@@ -79,7 +79,7 @@ jobs:
     # Note: re-pushing a tag will create a new release; delete the old release first if needed
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a # v3
+        uses: actions/download-artifact@9c1947435767b05149a4bb3e0b5e1e99c2156483 # v4
         with:
           path: dist
 
