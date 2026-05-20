@@ -1,33 +1,13 @@
 services:
-  # Upstream registry v2 (real Docker Registry)
-  upstream:
-    image: registry:2
-    container_name: ociproxy-test-upstream
-    environment:
-      REGISTRY_HTTP_ADDR: :5000
-      REGISTRY_STORAGE_DELETE_ENABLED: "true"
-    ports:
-      - "5001:5000"
-
-  # Test mirror 1 — registry running on :5002
-  upstream-mirror:
-    image: registry:2
-    container_name: ociproxy-test-mirror
-    environment:
-      REGISTRY_HTTP_ADDR: :5000
-    ports:
-      - "5002:5000"
-
-  # ociproxy
   ociproxy:
-    container_name: ociproxy-test-proxy
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile
+      args:
+        VERSION: ${VERSION:-latest}
+    container_name: ociproxy
     ports:
-      - "8081:8080"
+      - "8080:8080"
     volumes:
-      - ./test-config.yaml:/etc/ociproxy/config.yaml:ro
-    depends_on:
-      - upstream
-      - upstream-mirror
+      - ./config.yaml:/etc/ociproxy/config.yaml:ro
+    restart: unless-stopped

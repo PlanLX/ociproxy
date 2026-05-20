@@ -1,0 +1,32 @@
+services:
+  registry:
+    image: registry:3
+    container_name: registry
+    environment:
+      REGISTRY_LOG_LEVEL: info
+      REGISTRY_STORAGE: s3
+      REGISTRY_STORAGE_S3_ACCESSKEY: ${REGISTRY_STORAGE_S3_ACCESSKEY}
+      REGISTRY_STORAGE_S3_SECRETKEY: ${REGISTRY_STORAGE_S3_SECRETKEY}
+      REGISTRY_STORAGE_S3_BUCKET: ${REGISTRY_STORAGE_S3_BUCKET}
+      REGISTRY_STORAGE_S3_REGION: ${REGISTRY_STORAGE_S3_REGION}
+      REGISTRY_STORAGE_S3_ENDPOINT: ${REGISTRY_STORAGE_S3_ENDPOINT}
+      REGISTRY_STORAGE_S3_SECURE: ${REGISTRY_STORAGE_S3_SECURE}
+      REGISTRY_PROXY_REMOTEURL: http://ociproxy:8080
+    ports:
+      - "15000:5000"
+    networks:
+      - registry
+
+  ociproxy:
+    container_name: ociproxy
+    image: ghcr.io/planlx/ociproxy:0.1.0
+    volumes:
+      - ./config.yaml:/etc/ociproxy/config.yaml:ro
+    depends_on:
+      - registry
+    networks:
+      - registry
+
+networks:
+  registry:
+    driver: bridge
