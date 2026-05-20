@@ -85,6 +85,32 @@ type Config struct {
 	Registries []Registry `yaml:"registries"`
 	// BlockImages lists image patterns to block.
 	BlockImages []string `yaml:"block_images,omitempty"`
+	// Storage holds S3 storage configuration for the embedded registry cache.
+	Storage *StorageConfig `yaml:"storage,omitempty"`
+}
+
+// StorageConfig holds S3 storage configuration for the embedded registry.
+type StorageConfig struct {
+	// Type is the storage driver type (e.g., "s3", "filesystem").
+	Type string `yaml:"type"`
+	// Region is the S3 region.
+	Region string `yaml:"region"`
+	// Bucket is the S3 bucket name.
+	Bucket string `yaml:"bucket"`
+	// AccessKey is the S3 access key.
+	AccessKey string `yaml:"accesskey"`
+	// SecretKey is the S3 secret key.
+	SecretKey string `yaml:"secretkey"`
+	// RootDirectory is the S3 key prefix (e.g., "/ociproxy").
+	RootDirectory string `yaml:"rootdirectory"`
+	// Secure enables HTTPS for S3.
+	Secure bool `yaml:"secure"`
+	// ForcePathStyle forces path-style S3 URLs (needed for MinIO).
+	ForcePathStyle bool `yaml:"forcepathstyle"`
+	// RegionEndpoint is a custom S3 endpoint (for MinIO, etc.).
+	RegionEndpoint string `yaml:"regionendpoint"`
+	// Encrypt enables server-side encryption.
+	Encrypt bool `yaml:"encrypt"`
 }
 
 // LoadFile reads config from a YAML file.

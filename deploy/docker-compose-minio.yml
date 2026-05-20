@@ -1,0 +1,10 @@
+services:
+  ociproxy:
+    image: ghcr.io/planlx/ociproxy:0.1.1
+    container_name: ociproxy
+    command: ["--config", "/etc/ociproxy/config.yaml", "--addr", ":8080"]
+    ports:
+      - "15000:8080"
+    volumes:
+      - ./config.yaml:/etc/ociproxy/config.yaml:ro
+    restart: unless-stopped

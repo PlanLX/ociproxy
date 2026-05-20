@@ -1,3 +1,5 @@
+# docker build -t ghcr.io/planlx/ociproxy:0.1.1 -f deploy/Dockerfile .
+
 FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
 
 ARG TARGETOS TARGETARCH
