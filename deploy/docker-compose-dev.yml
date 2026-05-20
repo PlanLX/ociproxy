@@ -1,0 +1,19 @@
+services:
+  ociproxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: ociproxy
+    environment:
+      REGISTRY_STORAGE_S3_ACCESSKEY: ${REGISTRY_STORAGE_S3_ACCESSKEY}
+      REGISTRY_STORAGE_S3_SECRETKEY: ${REGISTRY_STORAGE_S3_SECRETKEY}
+      REGISTRY_STORAGE_S3_BUCKET: ${REGISTRY_STORAGE_S3_BUCKET}
+      REGISTRY_STORAGE_S3_REGION: ${REGISTRY_STORAGE_S3_REGION}
+      REGISTRY_STORAGE_S3_ENDPOINT: ${REGISTRY_STORAGE_S3_ENDPOINT}
+      REGISTRY_STORAGE_S3_SECURE: ${REGISTRY_STORAGE_S3_SECURE}
+    command: ["--config", "/etc/ociproxy/config.yaml", "--addr", ":8080"]
+    ports:
+      - "15000:8080"
+    volumes:
+      - ./config.yaml:/etc/ociproxy/config.yaml:ro
+    restart: unless-stopped
