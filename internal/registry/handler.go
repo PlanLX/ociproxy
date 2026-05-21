@@ -78,6 +78,12 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 			return
 		}
 
+		// Give distribution a long-lived context so S3 writes aren't cancelled
+		// when the client disconnects or the upstream request times out.
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		r = r.WithContext(ctx)
+
 		ns := r.URL.Query().Get("ns")
 		rest := strings.TrimPrefix(r.URL.Path, "/v2/")
 		var newPath string
