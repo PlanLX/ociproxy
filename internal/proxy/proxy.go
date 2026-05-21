@@ -67,16 +67,44 @@ func CloseAll() {
 type Handler struct {
 	cfg    *config.Config
 	logger *slog.Logger
+
+	// negCache caches 404 responses to prevent hammering upstream.
+	// Key = "method:path", value = notFoundEntry.
+	negCache sync.Map
 }
+
+// notFoundEntry records when a 404 was first seen.
+type notFoundEntry struct {
+	seenAt time.Time
+}
+
+// negativeCacheTTL is how long to cache 404 responses.
+const negativeCacheTTL = 60 * time.Second
 
 // New creates a new proxy handler.
 func New(cfg *config.Config, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Handler{
+	h := &Handler{
 		cfg:    cfg,
 		logger: logger,
+	}
+	go h.negCacheCleanup()
+	return h
+}
+
+// negCacheCleanup periodically removes expired entries.
+func (h *Handler) negCacheCleanup() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		h.negCache.Range(func(key, value any) bool {
+			if time.Since(value.(*notFoundEntry).seenAt) > negativeCacheTTL {
+				h.negCache.Delete(key)
+			}
+			return true
+		})
 	}
 }
 
@@ -135,6 +163,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check negative cache — avoid hammering upstream for known-missing images
+	cacheKey := r.Method + ":" + r.URL.Path
+	if entry, ok := h.negCache.Load(cacheKey); ok {
+		if time.Since(entry.(*notFoundEntry).seenAt) < negativeCacheTTL {
+			h.logger.Debug("serving cached 404", "path", r.URL.Path)
+			http.Error(w, "manifest unknown", http.StatusNotFound)
+			return
+		}
+		h.negCache.Delete(cacheKey)
+	}
+
 	// Try mirrors for this registry
 	resp, _ := h.tryMirrors(r, mirrors, info)
 	if resp != nil {
@@ -142,9 +181,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cache the 404 to prevent upstream hammering
+	h.negCache.Store(cacheKey, &notFoundEntry{seenAt: time.Now()})
+
 	// All mirrors for this registry failed
-	h.logger.Error("all mirrors failed", "registry", info.Registry)
-	http.Error(w, "bad gateway", http.StatusBadGateway)
+	h.logger.Warn("image not found, cached 404", "path", r.URL.Path, "ttl", negativeCacheTTL)
+	http.Error(w, "manifest unknown", http.StatusNotFound)
 }
 
 // tryMirrors iterates through mirrors and returns the first successful response.
