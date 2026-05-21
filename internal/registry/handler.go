@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/distribution/distribution/v3/configuration"
@@ -71,16 +72,28 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 
 	distApp := handlers.NewApp(ctx, distCfg)
 
-	// Rewrite path to always include registry namespace, so S3 storage paths
-	// are namespaced correctly (e.g., docker.io/library/busybox not just library/busybox).
+	// Cache 404 responses locally so repeated requests don't hit distribution,
+	// which would otherwise re-fetch from upstream and re-write to S3.
+	notFoundCache := &sync.Map{}
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v2/") && r.URL.Path != "/v2" {
 			distApp.ServeHTTP(w, r)
 			return
 		}
 
+		// Check 404 cache BEFORE hitting distribution — prevents upstream hammering
+		cacheKey := r.Method + ":" + r.URL.Path
+		if entry, ok := notFoundCache.Load(cacheKey); ok {
+			if time.Since(*entry.(*time.Time)) < 60*time.Second {
+				w.Header().Set("Cache-Control", "max-age=60")
+				http.Error(w, "manifest unknown", http.StatusNotFound)
+				return
+			}
+			notFoundCache.Delete(cacheKey)
+		}
+
 		// Give distribution a long-lived context so S3 writes aren't cancelled
-		// when the client disconnects or the upstream request times out.
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 		r = r.WithContext(ctx)
@@ -90,11 +103,8 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 		var newPath string
 
 		if ns != "" {
-			// Client specified ns — prepend it as registry namespace
 			newPath = "/v2/" + ns + "/" + rest
 		} else if !strings.Contains(rest, ".") {
-			// No ns, and first segment doesn't look like a hostname (e.g., "library")
-			// This is a default registry path — prepend the default registry
 			defaultReg := cfg.DefaultRegistry
 			if defaultReg == "" {
 				defaultReg = "docker.io"
@@ -102,16 +112,37 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 			newPath = "/v2/" + defaultReg + "/" + rest
 		}
 
+		// Wrap response writer to capture 404 status
+		rw := &statusWriter{ResponseWriter: w}
+
 		if newPath != "" {
 			r2 := r.Clone(r.Context())
 			r2.URL.Path = newPath
 			r2.URL.RawQuery = ""
-			distApp.ServeHTTP(w, r2)
-			return
+			distApp.ServeHTTP(rw, r2)
+		} else {
+			distApp.ServeHTTP(rw, r)
 		}
 
-		distApp.ServeHTTP(w, r)
+		// Cache 404 responses
+		if rw.code == http.StatusNotFound {
+			now := time.Now()
+			notFoundCache.Store(cacheKey, &now)
+		}
 	})
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			notFoundCache.Range(func(key, value any) bool {
+				if time.Since(*value.(*time.Time)) > 60*time.Second {
+					notFoundCache.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
 
 	logger.Info("embedded registry initialized",
 		"storage", cfg.Storage.Type,
@@ -121,6 +152,16 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 	)
 
 	return handler, func() { srvLn.Close() }, nil
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (rw *statusWriter) WriteHeader(code int) {
+	rw.code = code
+	rw.ResponseWriter.WriteHeader(code)
 }
 
 type srvListener struct {
