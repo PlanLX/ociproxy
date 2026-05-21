@@ -59,7 +59,8 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 	}
 
 	distCfg := &configuration.Configuration{
-		Version: "0.1",
+		Version:  "0.1",
+		Loglevel: configuration.Loglevel("warn"),
 		Storage: configuration.Storage{
 			"s3": s3Params,
 		},
