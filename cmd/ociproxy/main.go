@@ -80,6 +80,7 @@ func main() {
 				RegionEndpoint: cfg.Storage.RegionEndpoint,
 				Encrypt:        cfg.Storage.Encrypt,
 			},
+			DefaultRegistry: cfg.DefaultRegistry,
 		}, px, logger)
 		if err != nil {
 			logger.Error("failed to create embedded registry", "error", err)

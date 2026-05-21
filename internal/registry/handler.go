@@ -31,7 +31,8 @@ type StorageConfig struct {
 
 // Config holds the embedded registry configuration.
 type Config struct {
-	Storage StorageConfig `yaml:"storage"`
+	Storage       StorageConfig `yaml:"storage"`
+	DefaultRegistry string      `yaml:"default_registry"`
 }
 
 // NewHandler creates a distribution registry with S3 storage and pull-through cache.
@@ -69,11 +70,8 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 
 	distApp := handlers.NewApp(ctx, distCfg)
 
-	// Preserve ns= query param by rewriting path before distribution processes it.
-	// When client sends: /v2/openproject/openproject/manifests/16.4.1?ns=quay.io
-	// Distribution strips ns and forwards: /v2/openproject/openproject/manifests/16.4.1
-	// We rewrite to: /v2/quay.io/openproject/openproject/manifests/16.4.1
-	// So proxy can route correctly even without ns.
+	// Rewrite path to always include registry namespace, so S3 storage paths
+	// are namespaced correctly (e.g., docker.io/library/busybox not just library/busybox).
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v2/") && r.URL.Path != "/v2" {
 			distApp.ServeHTTP(w, r)
@@ -81,9 +79,23 @@ func NewHandler(ctx context.Context, cfg Config, proxyHandler http.Handler, logg
 		}
 
 		ns := r.URL.Query().Get("ns")
+		rest := strings.TrimPrefix(r.URL.Path, "/v2/")
+		var newPath string
+
 		if ns != "" {
-			rest := strings.TrimPrefix(r.URL.Path, "/v2/")
-			newPath := "/v2/" + ns + "/" + rest
+			// Client specified ns — prepend it as registry namespace
+			newPath = "/v2/" + ns + "/" + rest
+		} else if !strings.Contains(rest, ".") {
+			// No ns, and first segment doesn't look like a hostname (e.g., "library")
+			// This is a default registry path — prepend the default registry
+			defaultReg := cfg.DefaultRegistry
+			if defaultReg == "" {
+				defaultReg = "docker.io"
+			}
+			newPath = "/v2/" + defaultReg + "/" + rest
+		}
+
+		if newPath != "" {
 			r2 := r.Clone(r.Context())
 			r2.URL.Path = newPath
 			r2.URL.RawQuery = ""
