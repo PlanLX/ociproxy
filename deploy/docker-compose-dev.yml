@@ -11,9 +11,19 @@ services:
       REGISTRY_STORAGE_S3_REGION: ${REGISTRY_STORAGE_S3_REGION}
       REGISTRY_STORAGE_S3_ENDPOINT: ${REGISTRY_STORAGE_S3_ENDPOINT}
       REGISTRY_STORAGE_S3_SECURE: ${REGISTRY_STORAGE_S3_SECURE}
-    command: ["--config", "/etc/ociproxy/config.yaml", "--addr", ":8080"]
+    command: ["--config", "/etc/ociproxy/config.yaml", "--addr", ":8080", "--cache-dir", "/data/cache"]
     ports:
       - "15000:8080"
     volumes:
-      - ./config.yaml:/etc/ociproxy/config.yaml:ro
+      - ./config-dev.yaml:/etc/ociproxy/config.yaml:ro
+      - ../.data:/data/cache
     restart: unless-stopped
+
+networks:
+  default:
+    driver: bridge
+
+
+
+
+# docker compose -f deploy/docker-compose-dev.yml up

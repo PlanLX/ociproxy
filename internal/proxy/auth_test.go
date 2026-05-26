@@ -1,3 +1,8 @@
+//go:build ignore
+// +build ignore
+
+// COMMENTED OUT: tests for legacy authTransport, replaced by go-containerregistry (2026-05-26).
+// Kept for reference.
 package proxy
 
 import (

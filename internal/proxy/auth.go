@@ -1,3 +1,8 @@
+//go:build ignore
+// +build ignore
+
+// COMMENTED OUT: replaced by go-containerregistry's built-in auth (2026-05-26).
+// Kept for reference.
 package proxy
 
 import (

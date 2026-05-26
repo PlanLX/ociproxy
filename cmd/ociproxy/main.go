@@ -11,15 +11,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/planlx/ociproxy/internal/cache"
 	"github.com/planlx/ociproxy/internal/config"
 	"github.com/planlx/ociproxy/internal/proxy"
-	"github.com/planlx/ociproxy/internal/registry"
 	"github.com/planlx/ociproxy/internal/router"
 )
 
 var version = "dev"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "cache-evict" {
+		runCacheEvict(os.Args[2:])
+		return
+	}
+
 	var (
 		configPath string
 		addr       string
@@ -28,6 +33,7 @@ func main() {
 	flag.StringVar(&configPath, "config", "", "path to config YAML file")
 	flag.StringVar(&addr, "addr", ":8080", "listen address")
 	flag.StringVar(&logLevel, "log-level", "info", "log level (debug, info, warn, error)")
+	cacheDir := flag.String("cache-dir", "", "local filesystem cache directory (empty = no cache)")
 	flag.Parse()
 
 	if configPath == "" {
@@ -35,7 +41,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set up logger
 	var level slog.Level
 	switch logLevel {
 	case "debug":
@@ -54,53 +59,25 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	logger.Info("starting ociproxy", "version", version, "addr", addr, "config", configPath)
 
-	// Load config
 	cfg, err := config.LoadFile(configPath)
 	if err != nil {
 		logger.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
-	var handler http.Handler
-
-	if cfg.Storage != nil {
-		// Embedded registry with pull-through cache
-		px := proxy.New(cfg, logger)
-		regHandler, cleanup, err := registry.NewHandler(ctx, registry.Config{
-			Storage: registry.StorageConfig{
-				Type:           cfg.Storage.Type,
-				Region:         cfg.Storage.Region,
-				Bucket:         cfg.Storage.Bucket,
-				AccessKey:      cfg.Storage.AccessKey,
-				SecretKey:      cfg.Storage.SecretKey,
-				RootDirectory:  cfg.Storage.RootDirectory,
-				Secure:         cfg.Storage.Secure,
-				ForcePathStyle: cfg.Storage.ForcePathStyle,
-				RegionEndpoint: cfg.Storage.RegionEndpoint,
-				Encrypt:        cfg.Storage.Encrypt,
-			},
-			DefaultRegistry: cfg.DefaultRegistry,
-		}, px, logger)
-		if err != nil {
-			logger.Error("failed to create embedded registry", "error", err)
-			os.Exit(1)
-		}
-		defer cleanup()
-		handler = regHandler
-
-		logger.Info("embedded registry enabled", "storage", cfg.Storage.Type, "bucket", cfg.Storage.Bucket)
-	} else {
-		// Stateless proxy mode
-		h, err := router.New(cfg, logger)
-		if err != nil {
-			logger.Error("failed to create router", "error", err)
-			os.Exit(1)
-		}
-		handler = h
+	var localCache *cache.Store
+	if *cacheDir != "" {
+		localCache = cache.NewStore(*cacheDir, logger)
+		logger.Info("local cache enabled", "dir", *cacheDir)
 	}
 
-	// Start server
+	px := proxy.New(cfg, localCache, logger)
+	handler, err := router.New(cfg, px, logger)
+	if err != nil {
+		logger.Error("failed to create router", "error", err)
+		os.Exit(1)
+	}
+
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      handler,
@@ -117,14 +94,48 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	logger.Info("shutting down...")
-	ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(ctx2)
+	_ = srv.Shutdown(ctx)
 	proxy.CloseAll()
 	logger.Info("shutdown complete")
+}
+
+func runCacheEvict(args []string) {
+	fs := flag.NewFlagSet("cache-evict", flag.ExitOnError)
+	cacheDir := fs.String("cache-dir", "", "cache root directory (e.g. .data)")
+	maxAge := fs.Duration("max-age", 7*24*time.Hour, "evict blobs older than this duration")
+	dryRun := fs.Bool("dry-run", false, "show what would be evicted without deleting")
+	fs.Parse(args)
+
+	if *cacheDir == "" {
+		fmt.Fprintln(os.Stderr, "error: --cache-dir is required")
+		os.Exit(1)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	store := cache.NewStore(*cacheDir, logger)
+
+	fmt.Printf("scanning cache: %s (max-age=%s, dry-run=%v)\n", *cacheDir, *maxAge, *dryRun)
+
+	result, err := store.Evict(*maxAge, *dryRun)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, f := range result.EvictedFiles {
+		fmt.Println(f)
+	}
+
+	fmt.Printf("\nevicted: %d files, %.1f MB\n", result.EvictedCount, float64(result.EvictedBytes)/1024/1024)
+	fmt.Printf("remaining: %d blobs\n", result.RemainingCount)
+
+	if *dryRun {
+		fmt.Println("(dry run — nothing was deleted)")
+	}
 }

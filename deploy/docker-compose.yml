@@ -7,7 +7,7 @@ services:
         VERSION: ${VERSION:-latest}
     container_name: ociproxy
     ports:
-      - "8080:8080"
+      - "15000:8080"
     volumes:
       - ./config.yaml:/etc/ociproxy/config.yaml:ro
     restart: unless-stopped

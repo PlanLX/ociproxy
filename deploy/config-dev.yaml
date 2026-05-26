@@ -19,8 +19,8 @@ registries:
         weight: 10
 
       # GH proxy mirror (path prefix: /docker.io) — secondary
-      - url: https://docker.gh-proxy.org
-        base_path: /docker.io
+      - url: https://gh-proxy.org
+        base_path: /docker
         weight: 5
 
       # dockerproxy.net — fallback
@@ -47,8 +47,8 @@ registries:
         weight: 10
 
       # GH proxy mirror (path prefix: /ghcr.io) — secondary
-      - url: https://docker.gh-proxy.org
-        base_path: /ghcr.io
+      - url: https://gh-proxy.org
+        base_path: /docker/ghcr.io
         weight: 5
 
       # Real origin — last resort
@@ -67,8 +67,8 @@ registries:
         weight: 10
 
       # GH proxy mirror (path prefix: /registry.k8s.io) — secondary
-      - url: https://docker.gh-proxy.org
-        base_path: /registry.k8s.io
+      - url: https://gh-proxy.org
+        base_path: /docker/registry.k8s.io
         weight: 5
 
       # Real origin — last resort
@@ -87,8 +87,8 @@ registries:
         weight: 10
 
       # GH proxy mirror (path prefix: /gcr.io) — secondary
-      - url: https://docker.gh-proxy.org
-        base_path: /gcr.io
+      - url: https://gh-proxy.org
+        base_path: /docker/gcr.io
         weight: 5
 
       # Real origin — last resort
@@ -107,8 +107,8 @@ registries:
         weight: 10
 
       # GH proxy mirror (path prefix: /nvcr.io) — secondary
-      - url: https://docker.gh-proxy.org
-        base_path: /nvcr.io
+      - url: https://gh-proxy.org
+        base_path: /docker/nvcr.io
         weight: 5
 
       # Real origin — last resort
@@ -127,8 +127,8 @@ registries:
         weight: 10
 
       # GH proxy mirror (path prefix: /docker.elastic.co) — secondary
-      - url: https://docker.gh-proxy.org
-        base_path: /docker.elastic.co
+      - url: https://gh-proxy.org
+        base_path: /docker/docker.elastic.co
         weight: 5
 
       # Real origin — last resort
@@ -147,8 +147,8 @@ registries:
         weight: 10
 
       # GH proxy mirror (path prefix: /mcr.microsoft.com) — secondary
-      - url: https://docker.gh-proxy.org
-        base_path: /mcr.microsoft.com
+      - url: https://gh-proxy.org
+        base_path: /docker/mcr.microsoft.com
         weight: 5
 
       # Real origin — last resort
@@ -172,16 +172,3 @@ registries:
       - url: https://registry.ollama.ai
         default: true
         weight: 1
-
-storage:
-  type: s3
-  region: ${REGISTRY_STORAGE_S3_REGION}
-  bucket: ${REGISTRY_STORAGE_S3_BUCKET}
-  accesskey: ${REGISTRY_STORAGE_S3_ACCESSKEY}
-  secretkey: ${REGISTRY_STORAGE_S3_SECRETKEY}
-  regionendpoint: ${REGISTRY_STORAGE_S3_ENDPOINT}
-  secure: ${REGISTRY_STORAGE_S3_SECURE}
-  forcepathstyle: true
-  v4auth: true
-  rootdirectory: /ociproxy
-  encrypt: false

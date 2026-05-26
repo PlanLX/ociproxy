@@ -1,6 +1,6 @@
-# docker build -t ghcr.io/planlx/ociproxy:0.1.1 -f deploy/Dockerfile .
+# docker build -t ghcr.io/planlx/ociproxy:0.1.2 -f deploy/Dockerfile .
 
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 ARG TARGETOS TARGETARCH
 ARG VERSION=dev
@@ -8,6 +8,7 @@ ARG VERSION=dev
 WORKDIR /src
 
 COPY go.mod go.sum ./
+ENV GOPROXY=https://goproxy.cn,https://goproxy.io,direct
 RUN go mod download
 
 COPY . .
@@ -20,6 +21,9 @@ RUN apk --no-cache add ca-certificates
 
 COPY --from=builder /ociproxy /usr/local/bin/ociproxy
 COPY examples/default_config.yaml /etc/ociproxy/config.yaml
+
+# Create cache directory with proper ownership for non-root user
+RUN mkdir -p /data/cache && chown 65534:65534 /data/cache
 
 USER 65534:65534
 

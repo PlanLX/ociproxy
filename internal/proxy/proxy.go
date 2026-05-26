@@ -1,11 +1,12 @@
 // Package proxy provides stateless OCI registry proxy logic.
-// It forwards requests to upstream registries without caching or storage.
+// It uses go-containerregistry to communicate with upstream registries.
 package proxy
 
 import (
 	"context"
-	"crypto/tls"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,60 +14,79 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+
+	"github.com/planlx/ociproxy/internal/cache"
 	"github.com/planlx/ociproxy/internal/config"
 )
 
+// remoteOptsCache caches []remote.Option per mirror URL to avoid rebuilding.
 var (
-	clientsMu sync.Mutex
-	clients   = make(map[string]*http.Client)
+	optsMu     sync.RWMutex
+	optsCache  = make(map[string][]remote.Option)
 )
 
-// upstreamClient returns a dedicated HTTP client for the given mirror,
-// keyed by URL to enable connection reuse.
-func upstreamClient(url string) *http.Client {
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
-
-	if c, ok := clients[url]; ok {
-		return c
+// buildRemoteOpts builds remote.Option slice for a mirror.
+func buildRemoteOpts(mirror *config.Mirror) []remote.Option {
+	optsMu.RLock()
+	opts, ok := optsCache[mirror.URL]
+	optsMu.RUnlock()
+	if ok {
+		return opts
 	}
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-		Proxy:           http.ProxyFromEnvironment,
+	optsMu.Lock()
+	defer optsMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if opts, ok := optsCache[mirror.URL]; ok {
+		return opts
 	}
 
-	// Wrap with Bearer auth transport for anonymous or cred-based auth
-	at := &authTransport{
-		base:       tr,
-		hostURL:    url,
-		tokenCache: make(map[string]*tokenEntry),
-	}
+	var optsList []remote.Option
 
-	c := &http.Client{
-		Transport: at,
-		Timeout:   120 * time.Second,
+	// Auth
+	var auth authn.Authenticator
+	if mirror.Credentials != nil && mirror.Credentials.Username != "" {
+		auth = &authn.Basic{Username: mirror.Credentials.Username, Password: mirror.Credentials.Password}
+	} else {
+		auth = authn.Anonymous
 	}
+	optsList = append(optsList, remote.WithAuth(auth))
 
-	clients[url] = c
-	return c
+	// User agent
+	optsList = append(optsList, remote.WithUserAgent("ociproxy/1.0"))
+
+	// Transport with proxy support
+	tr := defaultTransport()
+	optsList = append(optsList, remote.WithTransport(tr))
+
+	// Timeout context wrapper — each call will use a 120s detached context
+	// go-containerregistry doesn't have a WithTimeout, so we use the default HTTP client
+	// with our transport
+
+	optsCache[mirror.URL] = optsList
+	return optsList
 }
 
-// CloseAll closes all upstream HTTP clients.
-func CloseAll() {
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
-
-	for _, c := range clients {
-		c.CloseIdleConnections()
+// defaultTransport returns the default HTTP transport with TLS and proxy support.
+func defaultTransport() *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: nil, // use system defaults
+		Proxy:           http.ProxyFromEnvironment,
 	}
-	clients = make(map[string]*http.Client)
 }
 
 // Handler is the stateless OCI registry proxy.
 type Handler struct {
 	cfg    *config.Config
 	logger *slog.Logger
+
+	// Optional local filesystem cache.
+	cache       *cache.Store
+	manifestMem *cache.ManifestCache
 
 	// negCache caches 404 responses to prevent hammering upstream.
 	// Key = "method:path", value = notFoundEntry.
@@ -82,15 +102,18 @@ type notFoundEntry struct {
 const negativeCacheTTL = 60 * time.Second
 
 // New creates a new proxy handler.
-func New(cfg *config.Config, logger *slog.Logger) *Handler {
+func New(cfg *config.Config, localCache *cache.Store, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	h := &Handler{
-		cfg:    cfg,
-		logger: logger,
+		cfg:         cfg,
+		logger:      logger,
+		cache:       localCache,
+		manifestMem: &cache.ManifestCache{},
 	}
 	go h.negCacheCleanup()
+	h.manifestMem.Cleanup()
 	return h
 }
 
@@ -108,6 +131,13 @@ func (h *Handler) negCacheCleanup() {
 	}
 }
 
+// CloseAll clears the remote options cache.
+func CloseAll() {
+	optsMu.Lock()
+	defer optsMu.Unlock()
+	optsCache = make(map[string][]remote.Option)
+}
+
 // ServeHTTP proxieses the request to the appropriate upstream mirror.
 //
 // URL formats:
@@ -117,12 +147,6 @@ func (h *Handler) negCacheCleanup() {
 //
 // Query parameter ns= overrides the registry namespace:
 //   /v2/<image>/manifests/<tag>?ns=docker.io  — e.g. /v2/library/busybox/manifests/latest?ns=docker.io
-//
-// When no registry prefix matches a configured namespace:
-//   - If the first segment contains a dot (hostname-like), it's treated as the registry name,
-//     and the request is routed to the default registry's mirror.
-//   - If the first segment doesn't contain a dot, it's part of the image name,
-//     and the default registry is used.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -134,10 +158,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the path to determine the target registry and upstream mirrors.
-	// The ns= query parameter can override the registry namespace extracted
-	// from the path, e.g. /v2/library/nginx/manifests/latest?ns=docker.io
-	// is routed as if the path were /v2/docker.io/library/nginx/...
 	info, err := h.parsePath(r.URL.Path, r.URL.Query().Get("ns"))
 	if err != nil {
 		if errors.Is(err, errUnknownRegistry) {
@@ -155,7 +175,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get all mirrors for this registry (best first, fallbacks after)
 	mirrors := info.resolveMirrors(h.cfg)
 	if len(mirrors) == 0 {
 		h.logger.Warn("unknown registry", "registry", info.Registry)
@@ -163,7 +182,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check negative cache — avoid hammering upstream for known-missing images
+	// Check negative cache
 	cacheKey := r.Method + ":" + r.URL.Path
 	if entry, ok := h.negCache.Load(cacheKey); ok {
 		if time.Since(entry.(*notFoundEntry).seenAt) < negativeCacheTTL {
@@ -174,63 +193,124 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.negCache.Delete(cacheKey)
 	}
 
-	// Try mirrors for this registry
-	resp, _ := h.tryMirrors(r, mirrors, info)
-	if resp != nil {
-		h.respond(w, r, resp)
+	// Check memory manifest cache
+	if isManifestPath(r.URL.Path) {
+		if hit := h.serveFromMemCache(w, r, info); hit {
+			return
+		}
+	}
+
+	// Route by path type
+	if isManifestPath(r.URL.Path) {
+		h.handleManifest(w, r, info, mirrors)
+	} else if isBlobPath(r.URL.Path) {
+		h.handleBlob(w, r, info, mirrors)
+	} else if isTagsPath(r.URL.Path) {
+		h.handleTags(w, r, info, mirrors)
+	} else {
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+// parseManifestPath extracts repo and ref from suffix like "/library/busybox/manifests/latest".
+func parseManifestPath(suffix string) (repo, ref string, ok bool) {
+	suffix = strings.TrimPrefix(suffix, "/")
+	idx := strings.Index(suffix, "/manifests/")
+	if idx <= 0 {
+		return "", "", false
+	}
+	repo = suffix[:idx]
+	ref = suffix[idx+len("/manifests/"):]
+	if repo == "" || ref == "" {
+		return "", "", false
+	}
+	return repo, ref, true
+}
+
+// parseBlobPath extracts repo and digest from suffix like "/library/busybox/blobs/sha256:abc".
+func parseBlobPath(suffix string) (repo, digest string, ok bool) {
+	suffix = strings.TrimPrefix(suffix, "/")
+	idx := strings.Index(suffix, "/blobs/")
+	if idx <= 0 {
+		return "", "", false
+	}
+	repo = suffix[:idx]
+	digest = suffix[idx+len("/blobs/"):]
+	if repo == "" || digest == "" {
+		return "", "", false
+	}
+	return repo, digest, true
+}
+
+// parseTagsPath extracts repo from suffix like "/library/nginx/tags/list".
+func parseTagsPath(suffix string) (repo string, ok bool) {
+	suffix = strings.TrimPrefix(suffix, "/")
+	idx := strings.Index(suffix, "/tags/list")
+	if idx <= 0 {
+		return "", false
+	}
+	repo = suffix[:idx]
+	if repo == "" {
+		return "", false
+	}
+	return repo, true
+}
+
+func (h *Handler) serveFromMemCache(w http.ResponseWriter, r *http.Request, info *pathInfo) bool {
+	repo, ref, ok := parseManifestPath(info.Suffix)
+	if !ok {
+		return false
+	}
+
+	memKey := cache.CacheKey("GET", info.Registry, repo, ref)
+	entry, ok := h.manifestMem.Get(memKey)
+	if !ok {
+		return false
+	}
+
+	h.logger.Debug("memory cache hit", "path", r.URL.Path, "repo", repo, "ref", ref)
+	body := entry.Data()
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(body))
+	w.Header().Set("Content-Type", entry.MediaType())
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.Header().Set("Docker-Content-Digest", digest)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+	return true
+}
+
+func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, info *pathInfo, mirrors []mirrorTarget) {
+	repo, ref, ok := parseManifestPath(info.Suffix)
+	if !ok {
+		h.logger.Warn("bad manifest path", "suffix", info.Suffix)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	// Cache the 404 to prevent upstream hammering
-	h.negCache.Store(cacheKey, &notFoundEntry{seenAt: time.Now()})
+	if r.Method == http.MethodHead {
+		h.handleManifestHead(w, r, info, mirrors, repo, ref)
+		return
+	}
 
-	// All mirrors for this registry failed
-	h.logger.Warn("image not found, cached 404", "path", r.URL.Path, "ttl", negativeCacheTTL)
-	http.Error(w, "manifest unknown", http.StatusNotFound)
-}
-
-// tryMirrors iterates through mirrors and returns the first successful response.
-// Returns nil if all mirrors failed. Second return value indicates if any
-// mirrors were actually tried (vs immediate config error).
-func (h *Handler) tryMirrors(r *http.Request, mirrors []mirrorTarget, info *pathInfo) (*http.Response, bool) {
+	// GET manifest — try mirrors
 	var lastErr error
 	for _, mt := range mirrors {
-		mirrorURL := trimTrailingSlash(mt.mirror.URL)
-		tPath := targetPath(mt.mirror, info.Suffix)
+		imageRef := buildImageRef(mt.mirror, info.Registry, repo, ref)
+		h.logger.Debug("trying mirror", "mirror", mt.mirror.URL, "image", imageRef, "repo", repo, "ref", ref)
 
-		h.logger.Debug("forwarding",
-			"registry", info.Registry,
-			"path", r.URL.Path,
-			"mirror", mirrorURL,
-			"target", tPath,
-		)
+		parsedRef, err := name.ParseReference(imageRef, name.StrictValidation)
+		if err != nil {
+			h.logger.Error("parse reference", "error", err, "image", imageRef)
+			continue
+		}
 
-		// Use a detached context with timeout, independent of the incoming
-		// request context (which may be canceled by distribution pull-through).
-		targetURL := mirrorURL + tPath
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		req, err := http.NewRequestWithContext(ctx, r.Method, targetURL, nil)
+		opts := append(buildRemoteOpts(mt.mirror), remote.WithContext(ctx))
+		desc, err := remote.Get(parsedRef, opts...)
+		cancel()
 		if err != nil {
-			cancel()
-			h.logger.Error("build request", "error", err)
-			return nil, false
-		}
-
-		// Forward query params except ns
-		q := r.URL.Query()
-		q.Del("ns")
-		req.URL.RawQuery = q.Encode()
-		h.copyHeaders(req, r)
-
-		if isManifestPath(r.URL.Path) {
-			req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/json")
-		}
-
-		resp, err := upstreamClient(mirrorURL).Do(req)
-		cancel() // release context after request
-		if err != nil {
-			h.logger.Warn("upstream request failed, trying next mirror",
-				"error", err, "mirror", mirrorURL)
+			h.logger.Warn("upstream GET failed, trying next mirror",
+				"error", err, "mirror", mt.mirror.URL, "image", imageRef)
 			mt.mirror.MarkFailed()
 			lastErr = err
 			continue
@@ -238,29 +318,282 @@ func (h *Handler) tryMirrors(r *http.Request, mirrors []mirrorTarget, info *path
 
 		mt.mirror.MarkSuccess()
 
-		// 404 means image not found in this registry, let caller try others
-		if resp.StatusCode == http.StatusNotFound {
-			resp.Body.Close()
-			return nil, true
-		}
+		// Cache in memory
+		memKey := cache.CacheKey("GET", info.Registry, repo, ref)
+		h.manifestMem.Set(memKey, desc.Manifest, string(desc.MediaType), cache.GetManifestTTL(ref))
 
-		return resp, true
+		// Write filesystem cache asynchronously
+		contentType := string(desc.MediaType)
+		if h.cache != nil {
+			body := desc.Manifest
+			digest := desc.Digest.String()
+			go func() {
+				if err := h.cache.PutManifest(info.Registry, repo, digest, body, contentType); err != nil {
+					h.logger.Error("failed to cache manifest", "error", err, "registry", info.Registry, "repo", repo, "digest", digest)
+				}
+			}()
+		}
+		h.logger.Info("upstream manifest fetched", "mirror", mt.mirror.URL, "registry", info.Registry, "repo", repo, "ref", ref, "digest", desc.Digest.String(), "size", len(desc.Manifest))
+
+		// Respond
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(desc.Manifest)))
+		w.Header().Set("Docker-Content-Digest", desc.Digest.String())
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(desc.Manifest)
+		return
 	}
 
 	if lastErr != nil {
 		h.logger.Warn("all mirrors failed", "registry", info.Registry, "error", lastErr)
 	}
-	return nil, true
+	h.negCache.Store(cacheKey(r), &notFoundEntry{seenAt: time.Now()})
+	http.Error(w, "manifest unknown", http.StatusNotFound)
 }
 
-// respond copies the upstream response back to the client.
-func (h *Handler) respond(w http.ResponseWriter, r *http.Request, resp *http.Response) {
-	h.copyResponseHeaders(w, resp)
-	w.WriteHeader(resp.StatusCode)
+func (h *Handler) handleManifestHead(w http.ResponseWriter, r *http.Request, info *pathInfo, mirrors []mirrorTarget, repo, ref string) {
+	var lastErr error
+	for _, mt := range mirrors {
+		imageRef := buildImageRef(mt.mirror, info.Registry, repo, ref)
+		h.logger.Debug("trying mirror (HEAD)", "mirror", mt.mirror.URL, "image", imageRef)
 
-	if r.Method == http.MethodGet && resp.Body != nil {
-		_, _ = io.Copy(w, resp.Body)
+		parsedRef, err := name.ParseReference(imageRef, name.StrictValidation)
+		if err != nil {
+			h.logger.Error("parse reference (HEAD)", "error", err, "image", imageRef)
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		opts := append(buildRemoteOpts(mt.mirror), remote.WithContext(ctx))
+		desc, err := remote.Head(parsedRef, opts...)
+		cancel()
+		if err != nil {
+			h.logger.Warn("upstream HEAD failed, trying next mirror",
+				"error", err, "mirror", mt.mirror.URL, "image", imageRef)
+			mt.mirror.MarkFailed()
+			lastErr = err
+			continue
+		}
+
+		mt.mirror.MarkSuccess()
+
+		h.logger.Info("upstream HEAD fetched", "mirror", mt.mirror.URL, "registry", info.Registry, "repo", repo, "ref", ref, "digest", desc.Digest.String())
+
+		w.Header().Set("Content-Type", string(desc.MediaType))
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", desc.Size))
+		w.Header().Set("Docker-Content-Digest", desc.Digest.String())
+		w.WriteHeader(http.StatusOK)
+		return
 	}
+
+	if lastErr != nil {
+		h.logger.Warn("all mirrors HEAD failed", "registry", info.Registry, "error", lastErr)
+	}
+	h.negCache.Store(cacheKey(r), &notFoundEntry{seenAt: time.Now()})
+	http.Error(w, "manifest unknown", http.StatusNotFound)
+}
+
+func (h *Handler) handleBlob(w http.ResponseWriter, r *http.Request, info *pathInfo, mirrors []mirrorTarget) {
+	repo, digest, ok := parseBlobPath(info.Suffix)
+	if !ok {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// Check local filesystem cache first (pull-through, same as S3 distribution mode)
+	if h.cache != nil {
+		reader, size, err := h.cache.GetBlob(info.Registry, repo, digest)
+		if err != nil {
+			h.logger.Warn("read blob cache failed, falling back to upstream", "error", err)
+		} else if reader != nil {
+			defer reader.Close()
+			h.logger.Info("blob cache hit", "registry", info.Registry, "repo", repo, "digest", digest, "size", size)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+			w.Header().Set("Docker-Content-Digest", digest)
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.Copy(w, reader)
+			return
+		}
+	}
+
+	var lastErr error
+	for _, mt := range mirrors {
+		imageRef := buildImageRef(mt.mirror, info.Registry, repo, digest)
+		parsedRef, err := name.NewDigest(imageRef, name.StrictValidation)
+		if err != nil {
+			h.logger.Error("parse digest reference", "error", err, "image", imageRef)
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		opts := append(buildRemoteOpts(mt.mirror), remote.WithContext(ctx))
+		layer, err := remote.Layer(parsedRef, opts...)
+		if err != nil {
+			cancel()
+			h.logger.Warn("upstream layer failed, trying next mirror",
+				"error", err, "mirror", mt.mirror.URL)
+			mt.mirror.MarkFailed()
+			lastErr = err
+			continue
+		}
+
+		mt.mirror.MarkSuccess()
+
+		size, err := layer.Size()
+		if err != nil {
+			cancel()
+			h.logger.Warn("get layer size failed", "error", err)
+			mt.mirror.MarkFailed()
+			continue
+		}
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+		w.Header().Set("Docker-Content-Digest", digest)
+
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Stream blob to client
+		reader, err := layer.Compressed()
+		if err != nil {
+			h.logger.Warn("get compressed layer failed", "error", err)
+			mt.mirror.MarkFailed()
+			continue
+		}
+
+		h.logger.Info("upstream blob fetched", "mirror", mt.mirror.URL, "registry", info.Registry, "repo", repo, "digest", digest, "size", size)
+
+		w.WriteHeader(http.StatusOK)
+
+		// Stream blob to client while writing to local cache (pull-through pattern)
+		if h.cache != nil {
+			tee := io.TeeReader(reader, w)
+			err = h.cache.PutBlob(info.Registry, repo, digest, tee, size)
+		} else {
+			_, err = io.Copy(w, reader)
+		}
+		reader.Close()
+		if err != nil {
+			h.logger.Warn("blob stream failed", "error", err)
+		}
+		return
+	}
+
+	if lastErr != nil {
+		h.logger.Warn("all mirrors blob failed", "registry", info.Registry, "error", lastErr)
+	}
+	http.Error(w, "blob unknown", http.StatusNotFound)
+}
+
+func (h *Handler) handleTags(w http.ResponseWriter, r *http.Request, info *pathInfo, mirrors []mirrorTarget) {
+	repo, ok := parseTagsPath(info.Suffix)
+	if !ok {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	var lastErr error
+	for _, mt := range mirrors {
+		// Build repo ref without tag for listing
+		imageRef := buildImageRefBase(mt.mirror, info.Registry, repo)
+		repoRef, err := name.NewRepository(imageRef, name.StrictValidation)
+		if err != nil {
+			h.logger.Error("parse repository reference", "error", err, "image", imageRef)
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		opts := append(buildRemoteOpts(mt.mirror), remote.WithContext(ctx))
+		tags, err := remote.List(repoRef, opts...)
+		cancel()
+		if err != nil {
+			h.logger.Warn("upstream list failed, trying next mirror",
+				"error", err, "mirror", mt.mirror.URL)
+			mt.mirror.MarkFailed()
+			lastErr = err
+			continue
+		}
+
+		mt.mirror.MarkSuccess()
+
+		// Build JSON response
+		tagsJSON := buildTagsJSON(repo, tags)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(tagsJSON)
+		return
+	}
+
+	if lastErr != nil {
+		h.logger.Warn("all mirrors tags failed", "registry", info.Registry, "error", lastErr)
+	}
+	http.Error(w, "tags unknown", http.StatusNotFound)
+}
+
+func buildTagsJSON(repo string, tags []string) []byte {
+	// Simple JSON construction without importing encoding/json
+	// Result: {"name":"<repo>","tags":["t1","t2",...]}
+	var sb strings.Builder
+	sb.WriteString(`{"name":"`)
+	sb.WriteString(repo)
+	sb.WriteString(`","tags":[`)
+	for i, t := range tags {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('"')
+		sb.WriteString(t)
+		sb.WriteByte('"')
+	}
+	sb.WriteString("]}")
+	return []byte(sb.String())
+}
+
+// buildImageRef constructs the full image reference for a mirror.
+// For m.daocloud.io with base_path=/docker.io, registry=docker.io, repo=library/busybox, ref=latest:
+//   -> m.daocloud.io/docker.io/library/busybox:latest
+// For mirrors without base_path (Docker Hub clones like docker.1ms.run):
+//   -> docker.1ms.run/library/busybox:latest
+func buildImageRef(mirror *config.Mirror, registry, repo, ref string) string {
+	host := extractHost(mirror.URL)
+	sep := ":"
+	if strings.HasPrefix(ref, "sha256:") || strings.HasPrefix(ref, "sha512:") {
+		sep = "@"
+	}
+	if mirror.BasePath != "" {
+		return fmt.Sprintf("%s%s/%s%s%s", host, mirror.BasePath, repo, sep, ref)
+	}
+	return fmt.Sprintf("%s/%s%s%s", host, repo, sep, ref)
+}
+
+// buildImageRefBase constructs the repository reference (no tag) for a mirror.
+// Used for remote.List and similar operations.
+func buildImageRefBase(mirror *config.Mirror, registry, repo string) string {
+	host := extractHost(mirror.URL)
+	if mirror.BasePath != "" {
+		return fmt.Sprintf("%s%s/%s", host, mirror.BasePath, repo)
+	}
+	return fmt.Sprintf("%s/%s", host, repo)
+}
+
+// extractHost extracts the hostname from a URL like "https://m.daocloud.io".
+func extractHost(url string) string {
+	url = strings.TrimPrefix(url, "https://")
+	url = strings.TrimPrefix(url, "http://")
+	url = trimTrailingSlash(url)
+	return url
+}
+
+func cacheKey(r *http.Request) string {
+	return r.Method + ":" + r.URL.Path
 }
 
 func (h *Handler) serveBase(w http.ResponseWriter, r *http.Request) {
@@ -270,85 +603,17 @@ func (h *Handler) serveBase(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("{}"))
 }
 
-func (h *Handler) copyHeaders(req *http.Request, src *http.Request) {
-	for k, vv := range src.Header {
-		if forwardRequestHeaders[k] {
-			for _, v := range vv {
-				req.Header.Add(k, v)
-			}
-		}
-	}
-	req.Header.Set("User-Agent", "ociproxy/1.0")
-}
-
-func (h *Handler) copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
-	for k, vv := range resp.Header {
-		if forwardResponseHeaders[k] {
-			for _, v := range vv {
-				w.Header().Add(k, v)
-			}
-		}
-	}
-}
-
-var forwardRequestHeaders = map[string]bool{
-	"Accept":            true,
-	"Accept-Encoding":   true,
-	"Authorization":     true,
-	"Cache-Control":     true,
-	"If-None-Match":     true,
-	"If-Modified-Since": true,
-	"OCI-Subject":       true,
-}
-
-var forwardResponseHeaders = map[string]bool{
-	"Content-Type":                true,
-	"Content-Length":              true,
-	"Content-Encoding":            true,
-	"Content-Range":               true,
-	"Accept-Ranges":               true,
-	"Docker-Content-Digest":       true,
-	"Docker-Distribution-API-Version": true,
-	"ETag":                        true,
-	"Cache-Control":               true,
-	"Last-Modified":               true,
-	"Location":                    true,
-	"Www-Authenticate":            true,
-	"Link":                        true,
-	"X-RateLimit-Limit":           true,
-	"X-RateLimit-Remaining":       true,
-	"Date":                        true,
-}
-
 var errUnknownRegistry = errors.New("unknown registry")
 
 // pathInfo holds parsed path data.
 type pathInfo struct {
-	// Registry is the registry namespace from the path (e.g., "docker.io").
-	Registry string
-	// Suffix is everything after the registry prefix (e.g., "/library/busybox/manifests/latest").
-	Suffix string
-	// IsHostname indicates the first path segment looks like a hostname (contains a dot).
+	Registry   string
+	Suffix     string
 	IsHostname bool
 }
 
 // parsePath extracts the registry namespace and image path from the URL.
-//
-// When ns (namespace) is provided via query parameter, it overrides the
-// registry namespace and the entire path after /v2/ is used as the image suffix.
-//
-// Examples:
-//
-//	/v2/docker.io/library/busybox/manifests/latest  (no ns)
-//	  → Registry="docker.io", Suffix="/library/busybox/manifests/latest"
-//
-//	/v2/library/busybox/manifests/latest?ns=docker.io
-//	  → Registry="docker.io", Suffix="/library/busybox/manifests/latest"
-//
-//	/v2/library/busybox/manifests/latest  (no ns, no dot, not a known registry)
-//	  → Registry="<default_registry>", Suffix="/library/busybox/manifests/latest"
 func (h *Handler) parsePath(rawPath string, ns string) (*pathInfo, error) {
-	// Strip /v2/ prefix
 	rest := rawPath
 	if len(rest) >= 3 && rest[:3] == "/v2" {
 		rest = rest[3:]
@@ -357,8 +622,6 @@ func (h *Handler) parsePath(rawPath string, ns string) (*pathInfo, error) {
 		rest = rest[1:]
 	}
 
-	// When ns is provided, treat it as the registry and use the entire
-	// remaining path as the image suffix
 	if ns != "" {
 		if reg := h.cfg.RegistryByName(ns); reg != nil {
 			return &pathInfo{
@@ -377,31 +640,23 @@ func (h *Handler) parsePath(rawPath string, ns string) (*pathInfo, error) {
 	first := rest[:slash]
 	suffix := rest[slash:]
 
-	// Determine the registry namespace
 	var registry string
 
 	if isHostname(first) {
-		// First segment is a hostname like "docker.io" or "registry-1.docker.io"
-		// Try to match a configured registry by name
 		if reg := h.cfg.RegistryByName(first); reg != nil {
 			registry = first
 		} else {
-			// Not a known registry name and no domain alias support yet
 			return nil, errUnknownRegistry
 		}
 	} else {
-		// First segment doesn't look like a hostname (e.g., "library")
-		// Check if it could be a registry name
 		if reg := h.cfg.RegistryByName(first); reg != nil {
 			registry = first
 		} else {
-			// Use the default registry namespace
 			def := h.cfg.DefaultRegistryConfig()
 			if def == nil {
 				return nil, nil
 			}
 			registry = def.Name
-			// The first segment is part of the image name, include it in suffix
 			suffix = "/" + first + suffix
 		}
 	}
@@ -414,15 +669,13 @@ func (h *Handler) parsePath(rawPath string, ns string) (*pathInfo, error) {
 }
 
 // resolveMirrors returns all mirrors for the path's registry, ordered by
-// weighted selection with the best candidate first. Returns empty slice if
-// the registry is unknown.
+// weighted selection with the best candidate first.
 func (p *pathInfo) resolveMirrors(cfg *config.Config) []mirrorTarget {
 	reg := cfg.RegistryByName(p.Registry)
 	if reg == nil {
 		return nil
 	}
 
-	// Select the best mirror, then build a fallback list from remaining mirrors
 	best := reg.SelectMirror()
 	if best == nil {
 		return nil
@@ -431,7 +684,6 @@ func (p *pathInfo) resolveMirrors(cfg *config.Config) []mirrorTarget {
 	var targets []mirrorTarget
 	targets = append(targets, mirrorTarget{mirror: best})
 
-	// Add remaining mirrors as fallbacks
 	for i := range reg.Mirrors {
 		m := &reg.Mirrors[i]
 		if m.URL == best.URL {
@@ -445,14 +697,6 @@ func (p *pathInfo) resolveMirrors(cfg *config.Config) []mirrorTarget {
 
 type mirrorTarget struct {
 	mirror *config.Mirror
-}
-
-// targetPath builds the upstream request path for a mirror.
-func targetPath(mirror *config.Mirror, suffix string) string {
-	if mirror.BasePath != "" {
-		return "/v2" + mirror.BasePath + suffix
-	}
-	return "/v2" + suffix
 }
 
 func trimTrailingSlash(s string) string {
@@ -482,4 +726,12 @@ func indexByte(s string, c byte) int {
 
 func isManifestPath(path string) bool {
 	return strings.Contains(path, "/manifests/")
+}
+
+func isBlobPath(path string) bool {
+	return strings.Contains(path, "/blobs/")
+}
+
+func isTagsPath(path string) bool {
+	return strings.Contains(path, "/tags/list")
 }

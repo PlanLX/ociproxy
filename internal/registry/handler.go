@@ -1,4 +1,9 @@
+//go:build ignore
+// +build ignore
+
 // Package registry provides an embedded OCI registry with S3 pull-through caching.
+// COMMENTED OUT: replaced by go-containerregistry in proxy.go (2026-05-26).
+// Kept for reference.
 package registry
 
 import (
