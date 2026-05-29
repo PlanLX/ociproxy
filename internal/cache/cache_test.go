@@ -11,7 +11,7 @@ import (
 	"github.com/planlx/ociproxy/internal/cache"
 )
 
-func newStore(t *testing.T) (*cache.Store, func()) {
+func newStore(t *testing.T) (*cache.FileStore, func()) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "cache")
 	return cache.NewStore(dir, nil), func() { os.RemoveAll(dir) }
@@ -34,7 +34,7 @@ func TestStore_ManifestRoundtrip(t *testing.T) {
 	}
 
 	// Store
-	if err := s.PutManifest(registry, repo, digest, data, "application/json"); err != nil {
+	if err := s.PutManifest(registry, repo, digest, "latest", data, "application/json"); err != nil {
 		t.Fatalf("PutManifest error: %v", err)
 	}
 

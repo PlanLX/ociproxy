@@ -131,6 +131,32 @@ func LoadFile(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// StorageFromEnv builds StorageConfig from REGISTRY_STORAGE_S3_* env vars.
+// Returns nil if no storage env vars are set.
+func StorageFromEnv() *StorageConfig {
+	bucket := os.Getenv("REGISTRY_STORAGE_S3_BUCKET")
+	if bucket == "" {
+		return nil
+	}
+	endpoint := os.Getenv("REGISTRY_STORAGE_S3_ENDPOINT")
+	forcePathStyle := os.Getenv("REGISTRY_STORAGE_S3_FORCEPATHSTYLE")
+	// Default to path-style when a custom endpoint is set (MinIO, etc.)
+	if forcePathStyle == "" && endpoint != "" {
+		forcePathStyle = "true"
+	}
+	return &StorageConfig{
+		Type:           "s3",
+		Region:         os.Getenv("REGISTRY_STORAGE_S3_REGION"),
+		Bucket:         bucket,
+		AccessKey:      os.Getenv("REGISTRY_STORAGE_S3_ACCESSKEY"),
+		SecretKey:      os.Getenv("REGISTRY_STORAGE_S3_SECRETKEY"),
+		RootDirectory:  os.Getenv("REGISTRY_STORAGE_S3_ROOTDIRECTORY"),
+		Secure:         os.Getenv("REGISTRY_STORAGE_S3_SECURE") == "true",
+		ForcePathStyle: forcePathStyle == "true",
+		RegionEndpoint: endpoint,
+	}
+}
+
 // LoadFlags builds config from CLI flags.
 func LoadFlags() (*Config, error) {
 	var cfg Config

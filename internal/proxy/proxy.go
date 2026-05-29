@@ -84,8 +84,9 @@ type Handler struct {
 	cfg    *config.Config
 	logger *slog.Logger
 
-	// Optional local filesystem cache.
-	cache       *cache.Store
+	// Optional cache backend (filesystem or S3).
+	cache       cache.Store
+	cacheCloser io.Closer
 	manifestMem *cache.ManifestCache
 
 	// negCache caches 404 responses to prevent hammering upstream.
@@ -102,7 +103,7 @@ type notFoundEntry struct {
 const negativeCacheTTL = 60 * time.Second
 
 // New creates a new proxy handler.
-func New(cfg *config.Config, localCache *cache.Store, logger *slog.Logger) *Handler {
+func New(cfg *config.Config, localCache cache.Store, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -112,9 +113,19 @@ func New(cfg *config.Config, localCache *cache.Store, logger *slog.Logger) *Hand
 		cache:       localCache,
 		manifestMem: &cache.ManifestCache{},
 	}
+	if closer, ok := localCache.(io.Closer); ok {
+		h.cacheCloser = closer
+	}
 	go h.negCacheCleanup()
 	h.manifestMem.Cleanup()
 	return h
+}
+
+// Close releases resources held by the cache backend.
+func (h *Handler) Close() {
+	if h.cacheCloser != nil {
+		h.cacheCloser.Close()
+	}
 }
 
 // negCacheCleanup periodically removes expired entries.
@@ -328,7 +339,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, info *p
 			body := desc.Manifest
 			digest := desc.Digest.String()
 			go func() {
-				if err := h.cache.PutManifest(info.Registry, repo, digest, body, contentType); err != nil {
+				if err := h.cache.PutManifest(info.Registry, repo, digest, ref, body, contentType); err != nil {
 					h.logger.Error("failed to cache manifest", "error", err, "registry", info.Registry, "repo", repo, "digest", digest)
 				}
 			}()

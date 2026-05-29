@@ -65,10 +65,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	var localCache *cache.Store
+	var localCache cache.Store
 	if *cacheDir != "" {
 		localCache = cache.NewStore(*cacheDir, logger)
 		logger.Info("local cache enabled", "dir", *cacheDir)
+	} else {
+		storage := cfg.Storage
+		source := "config"
+		if storage == nil {
+			storage = config.StorageFromEnv()
+			source = "env"
+		}
+		if storage != nil && storage.Type == "s3" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			s3store, err := cache.NewS3Store(ctx, storage, logger)
+			cancel()
+			if err != nil {
+				logger.Error("failed to initialize S3 cache", "error", err)
+				os.Exit(1)
+			}
+			localCache = s3store
+			logger.Info("S3 cache enabled", "bucket", storage.Bucket, "prefix", storage.RootDirectory, "source", source)
+		} else {
+			logger.Info("no cache configured (neither --cache-dir, config storage, nor S3 env vars)", "config_storage", cfg.Storage != nil)
+		}
 	}
 
 	px := proxy.New(cfg, localCache, logger)
@@ -102,6 +122,7 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(ctx)
 	proxy.CloseAll()
+	px.Close()
 	logger.Info("shutdown complete")
 }
 
@@ -110,19 +131,69 @@ func runCacheEvict(args []string) {
 	cacheDir := fs.String("cache-dir", "", "cache root directory (e.g. .data)")
 	maxAge := fs.Duration("max-age", 7*24*time.Hour, "evict blobs older than this duration")
 	dryRun := fs.Bool("dry-run", false, "show what would be evicted without deleting")
+
+	// S3 flags
+	s3Bucket := fs.String("s3-bucket", "", "S3 bucket name")
+	s3Region := fs.String("s3-region", "us-east-1", "S3 region")
+	s3AccessKey := fs.String("s3-access-key", "", "S3 access key")
+	s3SecretKey := fs.String("s3-secret-key", "", "S3 secret key")
+	s3Endpoint := fs.String("s3-endpoint", "", "S3 endpoint (for MinIO, etc.)")
+	s3Prefix := fs.String("s3-prefix", "ociproxy", "S3 key prefix (e.g. ociproxy)")
+	s3ForcePathStyle := fs.Bool("s3-force-path-style", false, "force path-style S3 URLs")
+	s3Encrypt := fs.Bool("s3-encrypt", false, "enable server-side encryption")
+
 	fs.Parse(args)
 
-	if *cacheDir == "" {
-		fmt.Fprintln(os.Stderr, "error: --cache-dir is required")
+	var store cache.Store
+	var closer interface{ Close() }
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	if *cacheDir != "" {
+		store = cache.NewStore(*cacheDir, logger)
+		fmt.Printf("scanning filesystem cache: %s (max-age=%s, dry-run=%v)\n", *cacheDir, *maxAge, *dryRun)
+	} else if *s3Bucket != "" {
+		s3cfg := &config.StorageConfig{
+			Type:           "s3",
+			Region:         *s3Region,
+			Bucket:         *s3Bucket,
+			AccessKey:      *s3AccessKey,
+			SecretKey:      *s3SecretKey,
+			RegionEndpoint: *s3Endpoint,
+			RootDirectory:  *s3Prefix,
+			ForcePathStyle: *s3ForcePathStyle,
+			Encrypt:        *s3Encrypt,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		s3store, err := cache.NewS3Store(ctx, s3cfg, logger)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		store = s3store
+		closer = s3store
+		fmt.Printf("scanning S3 cache: bucket=%s prefix=%s (max-age=%s, dry-run=%v)\n", *s3Bucket, *s3Prefix, *maxAge, *dryRun)
+	} else if envCfg := config.StorageFromEnv(); envCfg != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		s3store, err := cache.NewS3Store(ctx, envCfg, logger)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		store = s3store
+		closer = s3store
+		fmt.Printf("scanning S3 cache: bucket=%s prefix=%s (max-age=%s, dry-run=%v)\n", envCfg.Bucket, envCfg.RootDirectory, *maxAge, *dryRun)
+	} else {
+		fmt.Fprintln(os.Stderr, "error: --cache-dir or --s3-bucket is required")
 		os.Exit(1)
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	store := cache.NewStore(*cacheDir, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
-	fmt.Printf("scanning cache: %s (max-age=%s, dry-run=%v)\n", *cacheDir, *maxAge, *dryRun)
-
-	result, err := store.Evict(*maxAge, *dryRun)
+	result, err := store.Evict(ctx, *maxAge, *dryRun)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -137,5 +208,9 @@ func runCacheEvict(args []string) {
 
 	if *dryRun {
 		fmt.Println("(dry run — nothing was deleted)")
+	}
+
+	if closer != nil {
+		closer.Close()
 	}
 }
