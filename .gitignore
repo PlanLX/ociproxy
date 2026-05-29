@@ -49,3 +49,6 @@ junit.xml
 *.local.*
 
 playground
+
+# Cache Data
+.data/
